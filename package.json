@@ -1,0 +1,16 @@
+{
+  "name": "aon-roles-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "start": "npm start -w @aon/bot",
+    "brand": "python3 scripts/make-brand-assets.py"
+  },
+  "description": "AoN Role Bot \u2014 Age of Nations Discord role management (bot + dashboard)"
+}

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AoN Role Bot</title>
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
+  <link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/"><img src="/static/brand/mark-64.png" srcset="/static/brand/mark-128.png 2x" width="34" height="34" alt=""><span data-i18n="app_name"></span></a>
+    <span class="grow"></span>
+    <button class="btn" id="theme-toggle" type="button" data-i18n="theme_toggle"></button>
+    <button class="btn" id="lang-toggle" type="button"></button>
+    <a class="btn primary" id="login-btn" href="/auth/login" data-i18n="login"></a>
+  </header>
+  <main class="wrap">
+    <div class="notice" id="login-error" hidden data-i18n="error_generic"></div>
+    <section class="hero">
+      <img class="hero-logo" src="/static/brand/logo-full-256.webp" srcset="/static/brand/logo-full-512.webp 2x" width="200" height="200" alt="AoN Role Bot">
+      <h1 data-i18n="hero_title"></h1>
+      <p data-i18n="hero_text"></p>
+      <div class="cta">
+        <a class="btn primary" id="add-bot" href="/auth/login" data-i18n="add_bot"></a>
+        <a class="btn" href="/app" data-i18n="open_dashboard"></a>
+      </div>
+    </section>
+    <section class="grid" aria-label="features">
+      <article class="card"><h3 data-i18n="f1_t"></h3><p class="muted" data-i18n="f1_d"></p></article>
+      <article class="card"><h3 data-i18n="f2_t"></h3><p class="muted" data-i18n="f2_d"></p></article>
+      <article class="card"><h3 data-i18n="f3_t"></h3><p class="muted" data-i18n="f3_d"></p></article>
+      <article class="card"><h3 data-i18n="f4_t"></h3><p class="muted" data-i18n="f4_d"></p></article>
+    </section>
+    <section class="card">
+      <h3 data-i18n="how_t"></h3>
+      <ol><li data-i18n="how_1"></li><li data-i18n="how_2"></li><li data-i18n="how_3"></li><li data-i18n="how_4"></li></ol>
+    </section>
+    <p class="notice" data-i18n="status_note"></p>
+    <p class="muted" data-i18n="credit"></p>
+  </main>
+  <noscript><p class="wrap">JavaScript is required.</p></noscript>
+  <script src="/static/i18n.js"></script><script src="/static/common.js"></script><script src="/static/landing.js"></script>
+</body>
+</html>

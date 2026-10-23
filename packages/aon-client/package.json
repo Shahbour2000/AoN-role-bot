@@ -1,0 +1,10 @@
+{
+  "name": "@aon/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run", "lint": "tsc --noEmit" },
+  "dependencies": { "@aon/core": "*" },
+  "devDependencies": { "typescript": "^5.6.0", "vitest": "^2.1.0", "@types/node": "^22.0.0" }
+}
