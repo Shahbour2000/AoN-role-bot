@@ -1,6 +1,6 @@
 import {
-  computeRank, evaluateRankRules, planRoleChanges, validateLadder,
-  type Fetched, type RankDefinition, type RuleEvaluation,
+  classifyBuild, computeRank, evaluateRankRules, planRoleChanges, validateLadder,
+  type BuildClass, type Fetched, type RankDefinition, type RuleEvaluation,
 } from '@aon/core';
 import { citizenshipOf, rolesByPlayer, type CitizensIndex, type GovernmentRoster, type PlayerProfile } from '@aon/client';
 import { audit, recordLinkSync, type ActiveLink, type Db, type GuildConfig, type RoleKind, type RoleMapping } from '@aon/db';
@@ -21,6 +21,8 @@ export interface UserSyncResult {
   lookups: Record<string, Fetched<unknown>['status']>;
   /** Role values the game reported for this member (lets admins discover the exact value to map). Not used for decisions. */
   seen?: { partyRole?: string; unitRole?: string; unknownGovernmentRoles?: string[] };
+  /** The member's skill-based build as classified in this pass (undefined when no build role is configured or no profile was available). */
+  build?: BuildClass;
   note?: string;
 }
 
@@ -125,6 +127,7 @@ function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster:
       return { roleId: id, evidence: ms.state === 'member' && ms.value.id === ref && ms.value.role === leaderRole ? 'qualifies' : 'not_qualifies', why: isParty ? 'party_leadership' : 'unit_leadership' };
     }
     case 'alliance_member': case 'alliance_leader': return unknown(id, 'alliance_data_unverified');
+    case 'build_war': case 'build_eco': case 'build_hybrid': return unknown(id, 'build_evaluated_separately');       // handled as a group below
   }
 }
 
@@ -151,7 +154,9 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   const { cfg, db, game, discord } = ctx;
   const base: UserSyncResult = { discordUserId: link.discordUserId, playerId: link.playerId, outcome: 'unchanged', added: [], removed: [], blocked: [], skipped: [], lookups: {} };
 
-  const enabled = ctx.mappings.filter((m) => cfg.modules[moduleOf(m.kind)]);
+  // Build roles (war / eco / hybrid) are permanent: they do not depend on any module or community type.
+  const buildMaps = ctx.mappings.filter((m) => m.kind.startsWith('build_'));
+  const enabled = ctx.mappings.filter((m) => !m.kind.startsWith('build_') && cfg.modules[moduleOf(m.kind)]).concat(buildMaps);
   const rankOk = cfg.modules.ranks && validateLadder(ctx.ladder).ok;
   const activeLadder = rankOk ? ctx.ladder.filter((r) => r.enabled) : [];       // disabled ranks are completely unmanaged
   const rankRoles = activeLadder.filter((r) => r.discordRoleId);
@@ -165,9 +170,9 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   if (member.status === 'error') return { ...base, outcome: 'failed', note: `discord_${member.message}` };
 
   // Fetch only what the enabled rules need.
-  const needRoster = enabled.some((m) => moduleOf(m.kind) === 'government' && m.kind !== 'citizen') && !!cfg.countryId;
+  const needRoster = enabled.some((m) => moduleOf(m.kind) === 'government' && m.kind !== 'citizen' && !m.kind.startsWith('build_')) && !!cfg.countryId;   // builds need the profile only
   const needCitizens = enabled.some((m) => m.kind === 'citizen' && !m.gameRef) && !!cfg.countryId;
-  const needProfile = enabled.some((m) => ['party_member', 'party_role', 'unit_member', 'party_leader', 'unit_leader'].includes(m.kind) || (m.kind === 'citizen' && !!m.gameRef));
+  const needProfile = buildMaps.length > 0 || enabled.some((m) => ['party_member', 'party_role', 'unit_member', 'party_leader', 'unit_leader'].includes(m.kind) || (m.kind === 'citizen' && !!m.gameRef));
   const needDamage = rankRoles.length > 0;
   const [roster, citizens, profile, damage] = await Promise.all([
     needRoster ? game.governmentRoster(cfg.countryId!) : undefined,
@@ -186,7 +191,19 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   const statuses = Object.values(base.lookups);
   const allFailed = statuses.length > 0 && statuses.every((s) => s !== 'ok');
 
-  const evaluations: RuleEvaluation[] = enabled.map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens));
+  const evaluations: RuleEvaluation[] = enabled.filter((m) => !m.kind.startsWith('build_')).map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens));
+  // Player build roles: ONE classification (shared service) decides; only a definite War/Eco/Hybrid changes roles. 'unclassified'
+  // (data complete, no build qualifies) and 'insufficient' (missing/invalid skills, failed profile) are never destructive: nothing changes.
+  if (buildMaps.length) {
+    if (!profile || profile.status !== 'ok') evaluations.push(...buildMaps.map((m) => unknown(m.discordRoleId, `profile_${profile?.status ?? 'missing'}`)));
+    else {
+      const b = classifyBuild(profile.data.skills); base.build = b.kind;
+      const target = b.kind === 'war' || b.kind === 'eco' || b.kind === 'hybrid' ? buildMaps.find((m) => m.kind === `build_${b.kind}`) : undefined;
+      if (b.kind !== 'war' && b.kind !== 'eco' && b.kind !== 'hybrid') evaluations.push(...buildMaps.map((m) => unknown(m.discordRoleId, `build_${b.kind}`)));
+      else if (!target) evaluations.push(...buildMaps.map((m) => unknown(m.discordRoleId, 'build_role_not_configured')));       // never guess another build's role
+      else evaluations.push(...buildMaps.map((m) => ({ roleId: m.discordRoleId, evidence: m === target ? ('qualifies' as const) : ('not_qualifies' as const), why: 'build' })));
+    }
+  }
   // Rank roles that were deleted from the ladder: a configuration fact (no game data needed) ⇒ strip them from the member.
   for (const r of retired) evaluations.push({ roleId: r, evidence: 'not_qualifies', why: 'rank_retired' });
   let belowSince: Date | null = link.rankBelowSince;

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { Fetched } from '@aon/core';
 import type { PartySummary, PlayerIdentity, UnitSummary } from '@aon/client';
 import {
-  ROLE_KINDS, addRoleMapping, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
+  ROLE_KINDS, BUILD_ROLE_KEYS, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
   getSyncStatus, listAudit, listLinksDetailed, listRoleMappings, listSyncJobs, removeRoleMapping, reviewLink, saveLadder, updateGuildSettings, DEFAULT_LADDER_SEED, type Db,
 } from '@aon/db';
 import type { WebConfig } from './config.js';
@@ -183,7 +183,8 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (cfgG?.modules.ranks && ladder.some((r) => r.enabled && !r.discordRoleId)) warnings.push('rank_roles_unmapped');
     if (!mappings.length && !ladder.some((r) => r.discordRoleId)) warnings.push('nothing_configured');
     if ((counts['pending'] ?? 0) > 0) warnings.push('pending_requests');
-    return { settings: cfgG && { ...cfgG, syncIntervalHours: cfgG.syncIntervalMinutes / 60 }, links: { active: (counts['verified'] ?? 0) + (counts['admin_linked'] ?? 0), pending: counts['pending'] ?? 0 }, lastJob: jobs[0] ?? null, recentJobs: jobs, recentAudit: audit, warnings, modules: cfgG?.modules ?? null };
+    const builds = await getBuildRoles(db, a.guildId);
+    return { settings: cfgG && { ...cfgG, syncIntervalHours: cfgG.syncIntervalMinutes / 60 }, links: { active: (counts['verified'] ?? 0) + (counts['admin_linked'] ?? 0), pending: counts['pending'] ?? 0 }, lastJob: jobs[0] ?? null, recentJobs: jobs, recentAudit: audit, warnings, modules: cfgG?.modules ?? null, builds: { configured: BUILD_ROLE_KEYS.filter((k) => builds[k]).length, total: BUILD_ROLE_KEYS.length }, mappingsCount: mappings.filter((m) => !isBuildKind(m.kind)).length };
   });
 
   app.get('/api/guilds/:guildId/diagnostics', async (req, reply) => {
@@ -197,7 +198,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
   const settingsView = async (guildId: string) => { const c = await getGuildConfig(db, guildId); return c && { ...c, syncIntervalHours: c.syncIntervalMinutes / 60 }; };
   const idOrNull = GAME_ID.nullable();
   const SettingsBody = z.object({
-    language: z.enum(['ar', 'en']), communityType: z.enum(['country', 'party', 'military_unit', 'alliance', 'general']),
+    language: z.enum(['ar', 'en']), communityType: z.enum(['country', 'party', 'military_unit', 'general']),          // alliance servers are not configurable (no verified data)
     countryId: idOrNull, partyId: idOrNull, unitId: idOrNull, allianceId: idOrNull,
     // `alliance` can only be false: alliance roles have no backing implementation yet (the game API data is not available), so the dashboard must not offer it.
     modules: z.object({ government: z.boolean(), party: z.boolean(), unit: z.boolean(), alliance: z.literal(false), ranks: z.boolean() }).strict(),
@@ -284,18 +285,19 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
 
   // ------------------------------------------------------------------ role mappings
   const MappingBody = z.object({ kind: z.enum(ROLE_KINDS), gameRef: z.string().regex(/^[A-Za-z0-9_-]{0,80}$/).optional(), discordRoleId: z.string().regex(SNOWFLAKE) }).strict();
-  app.get('/api/guilds/:guildId/mappings', async (req, reply) => { const a = await guard(req, reply); if (!a) return; return { mappings: await listRoleMappings(db, a.guildId) }; });
+  app.get('/api/guilds/:guildId/mappings', async (req, reply) => { const a = await guard(req, reply); if (!a) return; return { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind)) }; });
   app.post('/api/guilds/:guildId/mappings', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
     const p = MappingBody.safeParse(req.body);
     if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+    if (isBuildKind(p.data.kind)) return fail(reply, 422, 'use_builds_endpoint');             // build roles have their own permanent settings
     if (p.data.kind.startsWith('alliance_')) return fail(reply, 422, 'feature_unavailable');     // no backing implementation: the game API exposes no verified alliance data
     const roles = await rolesFor(a.guildId);
     if (!roles) return fail(reply, 503, 'discord_unavailable');
     const role = roles.find((r) => r.id === p.data.discordRoleId);
     if (!role || unusableRoles(roles, [p.data.discordRoleId]).length) return fail(reply, 422, 'role_invalid');
     const res = await addRoleMapping(db, { guildId: a.guildId, kind: p.data.kind, ...(p.data.gameRef ? { gameRef: p.data.gameRef } : {}), discordRoleId: p.data.discordRoleId, actor: a.session.discordUserId });
-    return res.ok ? { mappings: await listRoleMappings(db, a.guildId), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code.toLowerCase());
+    return res.ok ? { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind)), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code.toLowerCase());
   });
   app.delete('/api/guilds/:guildId/mappings/:mappingId', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
@@ -342,6 +344,38 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (player.status !== 'ok') return fail(reply, 503, 'game_api_unavailable');
     const res = await forceLink(db, { guildId: a.guildId, adminId: a.session.discordUserId, discordUserId: b.data.discordUserId, playerId: player.data.id, username: player.data.username, ...(b.data.reason ? { reason: b.data.reason } : {}), ...(b.data.replace ? { replace: true } : {}) });
     return res.ok ? { ok: true, player: player.data, replaced: res.replaced } : fail(reply, 409, 'conflict_requires_replace');
+  });
+
+  // ------------------------------------------------------------------ player build roles (War / Eco / Hybrid)
+  /** The three entries always exist (even unset). `status` tells the dashboard what to show: ok | unset | missing_in_discord | unmanageable | unknown. */
+  app.get('/api/guilds/:guildId/builds', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const [cur, roles] = await Promise.all([getBuildRoles(db, a.guildId), rolesFor(a.guildId)]);
+    const byId = new Map((roles ?? []).map((r) => [r.id, r]));
+    const builds = BUILD_ROLE_KEYS.map((key) => {
+      const id = cur[key]; const r = id ? byId.get(id) : undefined;
+      const status = !id ? 'unset' : !roles ? 'unknown' : !r ? 'missing_in_discord' : r.manageable ? 'ok' : 'unmanageable';
+      return { key, roleId: id, roleName: r?.name ?? null, roleColor: r?.color ?? null, status, reason: r && !r.manageable ? r.reason : null };
+    });
+    return { builds, discordAvailable: roles !== null };
+  });
+  const BuildsBody = z.object({ war: z.string().regex(SNOWFLAKE).nullable(), eco: z.string().regex(SNOWFLAKE).nullable(), hybrid: z.string().regex(SNOWFLAKE).nullable() }).partial().strict();
+  app.put('/api/guilds/:guildId/builds', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const p = BuildsBody.safeParse(req.body);
+    if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+    const ids = Object.values(p.data).filter((x): x is string => typeof x === 'string');
+    if (ids.length) {
+      const roles = await rolesFor(a.guildId);
+      if (!roles) return fail(reply, 503, 'discord_unavailable');
+      const bad = unusableRoles(roles, ids);                                                       // must exist in THIS server and be safe to manage
+      if (bad.length) return fail(reply, 422, 'role_invalid', { roleIds: bad });
+    }
+    const roles: Partial<Record<(typeof BUILD_ROLE_KEYS)[number], string | null>> = {};
+    for (const k of BUILD_ROLE_KEYS) { const v = p.data[k]; if (v !== undefined) roles[k] = v; }          // only the builds that were sent
+    const res = await setBuildRoles(db, { guildId: a.guildId, roles, actor: a.session.discordUserId });
+    if (!res.ok) return fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code === 'ROLE_CONFLICT' ? 'role_conflict' : res.code === 'DUPLICATE_ROLE' ? 'duplicate_role' : 'role_invalid', { roleIds: res.roleIds });
+    return { ok: true };
   });
 
   // ------------------------------------------------------------------ game entity pickers (verified mappers only)

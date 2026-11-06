@@ -5,6 +5,7 @@ import type { Db } from './db.js';
 export const ROLE_KINDS = [
   'president', 'vice_president', 'minister_defense', 'minister_foreign', 'minister_economy', 'congress', 'government_role',
   'citizen', 'party_member', 'party_leader', 'party_role', 'unit_member', 'unit_leader', 'alliance_member', 'alliance_leader',
+  'build_war', 'build_eco', 'build_hybrid',
 ] as const;
 export type RoleKind = (typeof ROLE_KINDS)[number];
 
@@ -247,4 +248,48 @@ export async function clearRetiredRankRoles(db: Db, guildId: string, jobId: stri
 }
 export async function isSyncRunning(db: Db, guildId: string): Promise<boolean> {
   return (await db.query(`SELECT 1 FROM sync_jobs WHERE guild_id=$1 AND status IN ('queued','running')`, [guildId])).rows.length > 0;
+}
+
+// ---- permanent player-build roles (War / Eco / Hybrid) ---------------------------------------------------------------
+export type BuildRoleKey = 'war' | 'eco' | 'hybrid';
+export const BUILD_ROLE_KEYS: readonly BuildRoleKey[] = ['war', 'eco', 'hybrid'];
+const BUILD_KIND = { war: 'build_war', eco: 'build_eco', hybrid: 'build_hybrid' } as const;
+export const isBuildKind = (k: string): boolean => k.startsWith('build_');
+
+export async function getBuildRoles(db: Db, guildId: string): Promise<Record<BuildRoleKey, string | null>> {
+  const { rows } = await db.query<{ kind: string; discord_role_id: string }>(`SELECT kind, discord_role_id FROM role_mappings WHERE guild_id=$1 AND kind IN ('build_war','build_eco','build_hybrid')`, [guildId]);
+  const by = new Map(rows.map((r) => [r.kind, r.discord_role_id]));
+  return { war: by.get('build_war') ?? null, eco: by.get('build_eco') ?? null, hybrid: by.get('build_hybrid') ?? null };
+}
+
+export type SetBuildResult = { ok: true } | { ok: false; code: 'ROLE_INVALID' | 'DUPLICATE_ROLE' | 'ROLE_CONFLICT'; roleIds?: string[] };
+/**
+ * Sets (string) or clears (null) the Discord role of each given build; builds not mentioned are unchanged. One transaction.
+ * Refuses: malformed ids, the same role for two builds, and a role already used as a military-rank role or by another role mapping.
+ * A role that stops being a build role is remembered so the next complete sync takes it off members (no contradictory build roles linger).
+ */
+export async function setBuildRoles(db: Db, a: { guildId: string; roles: Partial<Record<BuildRoleKey, string | null>>; actor: string | null }): Promise<SetBuildResult> {
+  const current = await getBuildRoles(db, a.guildId);
+  const next = { ...current }; const touched = BUILD_ROLE_KEYS.filter((k) => k in a.roles);
+  for (const k of touched) { const v = a.roles[k] ?? null; if (v !== null && !/^\d{5,25}$/.test(v)) return { ok: false, code: 'ROLE_INVALID', roleIds: [v] }; next[k] = v; }
+  const ids = BUILD_ROLE_KEYS.map((k) => next[k]).filter((x): x is string => x !== null);
+  if (new Set(ids).size !== ids.length) return { ok: false, code: 'DUPLICATE_ROLE' };
+  const fresh = touched.map((k) => next[k]).filter((x): x is string => x !== null);
+  if (fresh.length) {
+    const clash = (await db.query<{ r: string }>(
+      `SELECT discord_role_id AS r FROM military_ranks WHERE guild_id=$1 AND discord_role_id = ANY($2::text[])
+       UNION SELECT discord_role_id FROM role_mappings WHERE guild_id=$1 AND discord_role_id = ANY($2::text[]) AND kind NOT IN ('build_war','build_eco','build_hybrid')`, [a.guildId, fresh])).rows.map((r) => r.r);
+    if (clash.length) return { ok: false, code: 'ROLE_CONFLICT', roleIds: clash };
+  }
+  await db.tx(async (t) => {
+    for (const k of touched) {
+      await t.query('DELETE FROM role_mappings WHERE guild_id=$1 AND kind=$2', [a.guildId, BUILD_KIND[k]]);
+      if (next[k] !== null) await t.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ($1,$2,'',$3)`, [a.guildId, BUILD_KIND[k], next[k]]);
+      const old = current[k];
+      if (old && old !== next[k] && !ids.includes(old)) await t.query('INSERT INTO retired_rank_roles (guild_id, discord_role_id) VALUES ($1,$2) ON CONFLICT (guild_id, discord_role_id) DO UPDATE SET retired_at = now()', [a.guildId, old]);
+    }
+    if (ids.length) await t.query('DELETE FROM retired_rank_roles WHERE guild_id=$1 AND discord_role_id = ANY($2::text[])', [a.guildId, ids]);
+    await audit(t, { guildId: a.guildId, actor: a.actor, action: 'builds.updated', details: { builds: touched, cleared: touched.filter((k) => next[k] === null) } });
+  });
+  return { ok: true };
 }

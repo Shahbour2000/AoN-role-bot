@@ -399,3 +399,67 @@ describe('party / unit mappings and unlink', () => {
     expect(rows[0]!.method).toBe('self_direct');
   });
 });
+
+describe('player build roles API (War / Eco / Hybrid)', () => {
+  type Entry = { key: string; roleId: string | null; roleName: string | null; roleColor: number | null; status: string; reason: string | null };
+  const builds = async (c: Ctx, l: Login, g = G1) => (await get(c, l, `/api/guilds/${g}/builds`)).json() as { builds: Entry[]; discordAvailable: boolean };
+  const putB = (c: Ctx, l: Login, b: unknown, g = G1) => mut(c, l, 'PUT', `/api/guilds/${g}/builds`, b);
+  const entry = (r: { builds: Entry[] }, k: string) => r.builds.find((b) => b.key === k)!;
+  const dangerous = (id: string, bits: number) => role(id, 3, { permissions: String(bits) });
+
+  it('the three entries ALWAYS exist, unset by default, in a fixed order', async () => {
+    const { c, l } = await ctx(); const r = await builds(c, l);
+    expect(r.builds.map((b) => [b.key, b.roleId, b.status])).toEqual([['war', null, 'unset'], ['eco', null, 'unset'], ['hybrid', null, 'unset']]);
+  });
+  it('saves the three roles and returns their real names and colours; partial updates and clearing work', async () => {
+    const { c, l } = await ctx(); c.bot.roles.set(G1, [...c.bot.roles.get(G1)!, role('900005', 4, { name: 'War', color: 0xe74c3c } as never)]);
+    expect((await putB(c, l, { war: '900001', eco: '900002' })).statusCode).toBe(200);
+    expect((await putB(c, l, { hybrid: '900005' })).statusCode).toBe(200);
+    const r = await builds(c, l);
+    expect(entry(r, 'war')).toMatchObject({ roleId: '900001', roleName: 'role-900001', status: 'ok', reason: null }); expect(entry(r, 'hybrid')).toMatchObject({ roleId: '900005', roleName: 'War', roleColor: 0xe74c3c });
+    expect((await putB(c, l, { eco: null })).statusCode).toBe(200); expect(entry(await builds(c, l), 'eco')).toMatchObject({ roleId: null, status: 'unset' }); expect(entry(await builds(c, l), 'war').roleId).toBe('900001');
+  });
+  it('reports roles the bot cannot manage, roles deleted in Discord, and an unreachable Discord (no false "ok")', async () => {
+    const { c, l } = await ctx(); await putB(c, l, { war: '900001', eco: '900003' });
+    expect(entry(await builds(c, l), 'eco')).toMatchObject({ status: 'unmanageable', reason: 'above_bot_role' });
+    c.bot.roles.set(G1, c.bot.roles.get(G1)!.filter((r) => r.id !== '900001'));
+    expect(entry(await builds(c, l), 'war')).toMatchObject({ roleId: '900001', roleName: null, status: 'missing_in_discord' });
+    c.bot.down = true; const down = await builds(c, l); expect(down.discordAvailable).toBe(false); expect(entry(down, 'war').status).toBe('unknown');
+  });
+  it('validates in the server: unknown / @everyone / integration / sensitive roles, duplicates, conflicts, malformed bodies', async () => {
+    const { c, l } = await ctx(); const ranks = (await seed(c, l)).ranks;
+    c.bot.roles.set(G1, [...c.bot.roles.get(G1)!, dangerous('930001', 0x8)]);
+    for (const id of ['999999999', G1, '900004', '930001']) { const r = await putB(c, l, { war: id }); expect(r.statusCode, id).toBe(422); expect(r.json()).toMatchObject({ error: 'role_invalid' }); }
+    const dup = await putB(c, l, { war: '900001', eco: '900001' }); expect(dup.statusCode).toBe(422); expect(dup.json()).toMatchObject({ error: 'duplicate_role' });
+    await mut(c, l, 'PUT', `/api/guilds/${G1}/ranks`, { ranks: ranks.map((x, i) => (i === 0 ? { ...x, discordRoleId: '900001' } : x)) });
+    const rank = await putB(c, l, { hybrid: '900001' }); expect(rank.statusCode).toBe(409); expect(rank.json()).toMatchObject({ error: 'role_conflict', roleIds: ['900001'] });
+    await mut(c, l, 'POST', `/api/guilds/${G1}/mappings`, { kind: 'president', discordRoleId: '900002' });
+    expect((await putB(c, l, { war: '900002' })).statusCode).toBe(409);
+    for (const bad of [{ war: 'nope' }, { war: 5 }, { fast: '900001' }, { war: '900001', extra: 1 }]) expect((await putB(c, l, bad)).statusCode, JSON.stringify(bad)).toBe(422);
+    expect((await builds(c, l)).builds.every((b) => b.roleId === null)).toBe(true);
+  });
+  it('Discord unreachable: saving roles fails with 503, clearing still works', async () => {
+    const { c, l } = await ctx(); await putB(c, l, { war: '900001' }); c.bot.down = true;
+    expect((await putB(c, l, { eco: '900002' })).statusCode).toBe(503); expect((await putB(c, l, { war: null })).statusCode).toBe(200);
+  });
+  it('only managers of THIS server can read or change it; settings never leak between servers', async () => {
+    const { c, l } = await ctx([G1]);
+    expect((await get(c, l, `/api/guilds/${G2}/builds`)).statusCode).toBe(403); expect((await putB(c, l, { war: '900001' }, G2)).statusCode).toBe(403);
+    expect((await c.app.inject({ method: 'GET', url: `/api/guilds/${G1}/builds` })).statusCode).toBe(401);
+    expect((await c.app.inject({ method: 'PUT', url: `/api/guilds/${G1}/builds`, cookies: l.cookies, payload: { war: '900001' } })).statusCode).toBe(403);
+    expect((await builds(c, l)).builds.every((b) => b.roleId === null)).toBe(true);
+    const both = await ctx(); await putB(both.c, both.l, { war: '900001' }, G1); await putB(both.c, both.l, { war: '900002', eco: '900001' }, G2);
+    expect(entry(await builds(both.c, both.l, G1), 'war').roleId).toBe('900001'); expect(entry(await builds(both.c, both.l, G2), 'war').roleId).toBe('900002'); expect(entry(await builds(both.c, both.l, G1), 'eco').roleId).toBeNull();
+  });
+  it('build rows never appear in the ordinary role-mapping list, which refuses to create them; the overview counts them', async () => {
+    const { c, l } = await ctx(); await putB(c, l, { war: '900001', eco: '900002' });
+    expect(((await get(c, l, `/api/guilds/${G1}/mappings`)).json() as { mappings: unknown[] }).mappings).toEqual([]);
+    const r = await mut(c, l, 'POST', `/api/guilds/${G1}/mappings`, { kind: 'build_eco', discordRoleId: '900003' }); expect(r.statusCode).toBe(422); expect(r.json()).toMatchObject({ error: 'use_builds_endpoint' });
+    expect(((await get(c, l, `/api/guilds/${G1}/overview`)).json() as { builds: { configured: number; total: number } }).builds).toEqual({ configured: 2, total: 3 });
+  });
+  it('alliance can no longer be chosen as the server type; country, party and military unit can', async () => {
+    const { c, l } = await ctx(); const put = (t: string) => mut(c, l, 'PUT', `/api/guilds/${G1}/settings`, { communityType: t });
+    expect((await put('alliance')).statusCode).toBe(422);
+    for (const t of ['country', 'party', 'military_unit']) expect((await put(t)).statusCode, t).toBe(200);
+  });
+});

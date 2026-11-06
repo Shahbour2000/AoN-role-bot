@@ -108,3 +108,20 @@ describe('helpers', () => {
     expect(clip('😀😀😀😀', 3)).toBe('😀😀…'); expect(clip('abc', 3)).toBe('abc');
   });
 });
+
+describe('skill-based build on the card', () => {
+  const sk = (war: number, eco: number) => [
+    ...['attack', 'criticalChance', 'criticalDamages', 'armor', 'precision', 'dodge', 'health', 'lootChance'].map((code) => ({ code, level: war, maxLevel: 100 })),
+    ...['production', 'entrepreneurship', 'companies', 'management'].map((code) => ({ code, level: eco, maxLevel: 100 })),
+  ];
+  const withSkills = (s: unknown, lang: 'en' | 'ar' = 'en') => build({ lang, profile: card({ skills: s }) });
+  it('shows War / Economy / Hybrid with the two scores, in the server language', () => {
+    expect(field(withSkills(sk(80, 20)), 'Build')!.value).toBe('**War**\nWar 80 · Eco 20');
+    expect(field(withSkills(sk(20, 80)), 'Build')!.value).toContain('**Economy**'); expect(field(withSkills(sk(70, 65)), 'Build')!.value).toContain('**Hybrid**');
+    expect(field(withSkills(sk(80, 20), 'ar'), 'البناء')!.value).toContain('**حرب**');
+  });
+  it('omits the field for unclassified or insufficient data (never forces a build)', () => {
+    expect(field(withSkills(sk(10, 10)), 'Build')).toBeUndefined(); expect(field(withSkills(undefined), 'Build')).toBeUndefined(); expect(field(withSkills([{ code: 'attack', level: 1, maxLevel: 0 }]), 'Build')).toBeUndefined();
+    expect(validateEmbed(withSkills(sk(80, 20)))).toEqual([]);
+  });
+});

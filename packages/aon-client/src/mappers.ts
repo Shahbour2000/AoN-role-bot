@@ -84,6 +84,8 @@ export interface PlayerProfile {
   unit: Membership<Affiliation>;
   /** Top-level `offices` (e.g. ["congress","vicePresident"]); null when the field is absent/unreadable. */
   offices: string[] | null;
+  /** The profile's `skills` array ({code, level, maxLevel}) exactly as returned; null when absent. Interpreted ONLY by core's classifyBuild. */
+  skills: unknown[] | null;
 }
 
 function affiliation(root: Json, key: 'party' | 'unit' | 'militaryUnit'): Membership<Affiliation> {
@@ -115,6 +117,7 @@ export function extractPlayerProfile(res: Fetched<unknown>): Fetched<PlayerProfi
       // The real profile uses `militaryUnit`; `unit` is accepted as an alias only if `militaryUnit` is absent.
       unit: 'militaryUnit' in root ? affiliation(root, 'militaryUnit') : affiliation(root, 'unit'),
       offices,
+      skills: Array.isArray(root['skills']) ? (root['skills'] as unknown[]) : null,
     },
   };
 }
@@ -297,6 +300,7 @@ export interface ProfileCard {
   level: number | null; xp: number | null; prestige: number | null;
   damage: { total: number | null; day: number | null; week: number | null; month: number | null };
   offices: string[] | null; party: Membership<Affiliation>; unit: Membership<Affiliation>;
+  skills: unknown[] | null;
   joinedAt: string | null; serverTime: string | null;
 }
 export function extractProfileCard(res: Fetched<unknown>): Fetched<ProfileCard> {
@@ -305,7 +309,7 @@ export function extractProfileCard(res: Fetched<unknown>): Fetched<ProfileCard> 
   const root = (res as { data: Json }).data;
   const d = periodTriple(root['damage'], ['total', 'day', 'week', 'month']);
   return { status: 'ok', data: {
-    id: base.data.id, username: base.data.username, countryId: base.data.countryId, offices: base.data.offices, party: base.data.party, unit: base.data.unit,
+    id: base.data.id, username: base.data.username, countryId: base.data.countryId, offices: base.data.offices, party: base.data.party, unit: base.data.unit, skills: base.data.skills,
     avatarUrl: typeof root['avatarUrl'] === 'string' && root['avatarUrl'] ? root['avatarUrl'] : null,
     level: numOrNull(root['level']), xp: numOrNull(root['xp']), prestige: numOrNull(root['prestige']),
     damage: { total: d['total']!, day: d['day']!, week: d['week']!, month: d['month']! },

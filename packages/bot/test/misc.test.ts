@@ -52,6 +52,11 @@ describe('config', () => {
     let msg = ''; try { loadConfig({ DATABASE_URL: 'postgres://u:SECRETPW@h/db', DISCORD_BOT_TOKEN: 'TOKENVALUE', DISCORD_CLIENT_ID: '1', AON_API_BASE_URL: 'http://insecure' }); } catch (e) { msg = (e as Error).message; }
     expect(msg).toMatch(/must be https/); expect(msg).not.toMatch(/SECRETPW|TOKENVALUE/);
   });
+  it('the hosting provider\'s SERVER_PORT wins over PORT; PORT is the fallback; both are validated', () => {
+    const base = { DATABASE_URL: 'x', DISCORD_BOT_TOKEN: 'y', DISCORD_CLIENT_ID: '1' };
+    expect(loadConfig({ ...base, SERVER_PORT: '25565', PORT: '3000' }).port).toBe(25565); expect(loadConfig({ ...base, PORT: '3000' }).port).toBe(3000); expect(loadConfig(base).port).toBe(8080);
+    expect(() => loadConfig({ ...base, SERVER_PORT: '70000' })).toThrow(/SERVER_PORT \/ PORT must be 1-65535/);
+  });
   it('accepts a valid config with the production API default', () => {
     expect(loadConfig({ DATABASE_URL: 'x', DISCORD_BOT_TOKEN: 'y', DISCORD_CLIENT_ID: '1' }).apiBaseUrl).toBe('https://app.ageofnations.world/api/v1');
   });

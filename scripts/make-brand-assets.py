@@ -14,11 +14,12 @@ from PIL import Image
 
 BRAND = Path(__file__).resolve().parent.parent / "packages" / "web" / "public" / "brand"
 SRC = BRAND / "source" / "aon-role-bot-logo.png"
-# Emblem crop (robot + hat + laurels), in source pixels for a 1254 px image. The outer gold ring and the "AoN Role Bot"
-# lettering are painted out with the logo's own background first, so the small-size mark stays clean and nothing is cut off.
-EMBLEM_BOX = (195, 170, 1060, 815)
-RING_CENTER, RING_PAD = (623.5, 597.0), (468, 512)        # annulus (radius range) covering the outer ring
-TEXT_RECT = (392, 779, 862, 1000)                          # lettering below the robot (x0, y0, x1, y1)
+# Emblem crop (crown + robot), in source pixels for a 1254 px image. The outer neon ring and the "AoN ROLE BOT" lettering are
+# removed from the small-size mark: pixels are kept only inside the ring's inner radius or inside the crown box (the crown rises
+# above the ring), everything else is painted with the logo's own background, and the crop stops above the lettering.
+EMBLEM_BOX = (300, 70, 960, 652)
+RING_CENTER, KEEP_RADIUS = (627.0, 648.0), 412
+CROWN_BOX = (440, 70, 815, 330)
 
 def save(img, name, **kw):
     path = BRAND / name
@@ -37,11 +38,11 @@ def main():
         save(full, f"logo-full-{size}.png"); save(full, f"logo-full-{size}.webp", quality=90, method=6)
     save(src.resize((1024, 1024), Image.LANCZOS), "bot-avatar-1024.png")
     from PIL import ImageDraw
-    work = src.copy(); d = ImageDraw.Draw(work)
-    cx, cy = (RING_CENTER[0] * scale, RING_CENTER[1] * scale)
-    r_in, r_out = RING_PAD[0] * scale, RING_PAD[1] * scale
-    d.ellipse((cx - r_out, cy - r_out, cx + r_out, cy + r_out), outline=bg, width=int(r_out - r_in))   # erase the ring band only
-    d.rectangle(tuple(int(v * scale) for v in TEXT_RECT), fill=bg)
+    cx, cy, keep_r = RING_CENTER[0] * scale, RING_CENTER[1] * scale, KEEP_RADIUS * scale
+    mask = Image.new("L", src.size, 0); d = ImageDraw.Draw(mask)
+    d.ellipse((cx - keep_r, cy - keep_r, cx + keep_r, cy + keep_r), fill=255)
+    d.rectangle(tuple(int(v * scale) for v in CROWN_BOX), fill=255)
+    work = Image.composite(src, Image.new("RGB", src.size, bg), mask)
     box = tuple(int(v * scale) for v in EMBLEM_BOX)
     emblem = work.crop(box)
     side = max(emblem.size)

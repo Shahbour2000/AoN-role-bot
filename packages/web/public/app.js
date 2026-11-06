@@ -60,8 +60,8 @@
   }
 
   // ---------------------------------------------------------------- guild shell
-  const TABS = ['overview', 'setup', 'roles', 'ranks', 'players', 'sync', 'audit', 'diag'];
-  const PAGES = { overview, setup, roles: rolesPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
+  const TABS = ['overview', 'setup', 'roles', 'builds', 'ranks', 'players', 'sync', 'audit', 'diag'];
+  const PAGES = { overview, setup, roles: rolesPage, builds: buildsPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
   async function guildShell(g, tab, token) {
     if (!PAGES[tab]) tab = 'overview';
     const content = el('div', { id: 'tab-content' });
@@ -155,6 +155,32 @@
     return [m.data.mappings.length ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, [t('map_kind'), t('map_ref'), t('map_role'), ''].map((h) => el('th', { text: h })))), body)) : el('div', { class: 'empty', text: t('map_none') }),
       el('div', { class: 'card' }, el('div', { class: 'row' }, field(t('map_kind'), kind), field(t('map_ref'), ref), field(t('map_role'), role), add), chips,
         el('p', { class: 'muted', text: t('map_country_hint') }), el('p', { class: 'muted', text: t('map_entity_hint') }), el('p', { class: 'muted', text: t('alliance_unavailable') }))];
+  }
+
+  // ---------------------------------------------------------------- player build roles (War / Eco / Hybrid)
+  const BUILD_KEYS = ['war', 'eco', 'hybrid'];
+  async function buildsPage(g) {
+    const [b, rl, rk, mp] = await Promise.all([api('GET', `/api/guilds/${g}/builds`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/ranks`), api('GET', `/api/guilds/${g}/mappings`)]);
+    if (!b.ok) return [el('p', { class: 'err', text: errText(b) })];
+    const roles = rl.ok ? rl.data.roles : [];
+    const used = new Set([...(rk.ok ? rk.data.ranks.map((x) => x.discordRoleId) : []), ...(mp.ok ? mp.data.mappings.map((x) => x.discordRoleId) : [])].filter(Boolean));
+    const saved = Object.fromEntries(b.data.builds.map((x) => [x.key, x]));
+    const selects = {}; const msgs = {}; const save = el('button', { class: 'btn primary', type: 'button', id: 'builds-save', text: t('save') });
+    const refresh = () => {
+      const vals = BUILD_KEYS.map((k) => selects[k].value || null); let bad = false;
+      BUILD_KEYS.forEach((k) => { const v = selects[k].value || null; const dup = v && vals.filter((x) => x === v).length > 1; bad = bad || !!dup;
+        msgs[k].replaceChildren(!v ? el('span', { class: 'muted', text: t('bld_unset') }) : dup ? el('span', { class: 'err', role: 'alert', text: t('bld_dup') }) : ''); });
+      save.disabled = bad;
+    };
+    const cards = BUILD_KEYS.map((k) => {
+      const e = saved[k]; selects[k] = roleSelect(roles, e.roleId, true, new Set([...used].filter((x) => x !== e.roleId))); selects[k].id = `build-${k}`; selects[k].setAttribute('aria-label', t(`bld_${k}`));
+      msgs[k] = el('div'); selects[k].addEventListener('change', refresh);
+      return el('div', { class: 'card', id: `card-${k}` }, el('h3', { text: t(`bld_${k}`) }), el('p', { class: 'muted', text: t(`bld_${k}_d`) }), badge(t(`bs_${e.status}`), e.status === 'ok' ? 'ok' : e.status === 'unset' ? '' : 'warn'), el('div', { class: 'row' }, selects[k]), msgs[k]);
+    });
+    save.addEventListener('click', async () => { const res = await api('PUT', `/api/guilds/${g}/builds`, Object.fromEntries(BUILD_KEYS.map((k) => [k, selects[k].value || null]))); if (res.ok) { toast(t('saved')); route(); } else toast(errText(res), true); });
+    refresh();
+    return [el('h2', { text: t('bld_section') }), !b.data.discordAvailable ? el('div', { class: 'notice', text: t('e_discord_unavailable') }) : null, el('div', { class: 'grid' }, cards), el('div', { class: 'row' }, save), el('p', { class: 'muted', text: t('bld_hier') }),
+      el('details', {}, el('summary', { text: t('bld_how') }), el('ul', {}, ['bld_rule_war', 'bld_rule_eco', 'bld_rule_hybrid', 'bld_rule_none'].map((k) => el('li', { text: t(k) }))))];
   }
 
   // ---------------------------------------------------------------- military ranks (the editor)

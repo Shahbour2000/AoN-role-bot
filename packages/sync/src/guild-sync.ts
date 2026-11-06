@@ -11,6 +11,8 @@ export interface GuildSyncDetails {
   skippedReasons: Record<string, number>; blockedReasons: Record<string, number>; lookupFailures: Record<string, number>; errors: { discordUserId: string; note: string }[];
   /** Role values the game reported while syncing (party / unit roles per member count; government role values the app does not know yet). */
   seenRoles: { party: Record<string, number>; unit: Record<string, number>; governmentUnknown: string[] };
+  /** How many processed members fell into each build class this run (counts only; no player data). */
+  builds: Record<string, number>;
 }
 export type GuildSyncResult =
   | { ok: false; code: 'ALREADY_RUNNING' | 'GUILD_NOT_CONFIGURED' }
@@ -62,7 +64,7 @@ export async function syncGuild(deps: GuildSyncDeps, a: { guildId: string; kind:
   const links = await listActiveLinks(deps.db, a.guildId);
   log(`${tag} start members=${links.length}`);
   const counts: GuildSyncCounts = { total: links.length, processed: 0, updated: 0, unchanged: 0, partial: 0, failed: 0, skipped: 0, notProcessed: 0, rolesAdded: 0, rolesRemoved: 0, membersBlocked: 0 };
-  const details: GuildSyncDetails = { skippedReasons: {}, blockedReasons: {}, lookupFailures: {}, errors: [], seenRoles: { party: {}, unit: {}, governmentUnknown: [] } };
+  const details: GuildSyncDetails = { skippedReasons: {}, blockedReasons: {}, lookupFailures: {}, errors: [], seenRoles: { party: {}, unit: {}, governmentUnknown: [] }, builds: {} };
   const bump = (m: Record<string, number>, k: string) => { m[k] = (m[k] ?? 0) + 1; };
   const results: UserSyncResult[] = [];
   const batch = deps.batchSize ?? 10;
@@ -82,6 +84,7 @@ export async function syncGuild(deps: GuildSyncDeps, a: { guildId: string; kind:
         counts.rolesAdded += r.added.length; counts.rolesRemoved += r.removed.length; if (r.blocked.length) counts.membersBlocked++;
         if (r.seen?.partyRole) bump(details.seenRoles.party, r.seen.partyRole); if (r.seen?.unitRole) bump(details.seenRoles.unit, r.seen.unitRole);
         for (const g of r.seen?.unknownGovernmentRoles ?? []) if (!details.seenRoles.governmentUnknown.includes(g)) details.seenRoles.governmentUnknown.push(g);
+        if (r.build) bump(details.builds, r.build);
         for (const s of r.skipped) bump(details.skippedReasons, s.why);
         for (const b of r.blocked) bump(details.blockedReasons, b.why);
         for (const [src, st] of Object.entries(r.lookups)) if (st !== 'ok') bump(details.lookupFailures, `${src}:${st}`);

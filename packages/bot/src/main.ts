@@ -69,7 +69,7 @@ async function main() {
     const http = createServer(async (req, res) => {
       if (req.url === '/healthz') { const h = await health(); res.writeHead(h.database && h.discord ? 200 : 503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ discord: h.discord, database: h.database })); }
       else { res.writeHead(404).end(); }
-    }).listen(cfg.port, () => log(`health endpoint on :${cfg.port}`));
+    }).listen(cfg.port, '0.0.0.0', () => log(`health endpoint on :${cfg.port}`));
     closeHttp = () => new Promise<void>((r) => { http.close(() => r()); });
   }
 

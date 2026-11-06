@@ -1,4 +1,4 @@
-import { computeRank, type RankDefinition } from '@aon/core';
+import { classifyBuild, computeRank, type RankDefinition } from '@aon/core';
 import type { ProfileCard, StatsCard } from '@aon/client';
 import type { Lang } from './messages.js';
 
@@ -43,6 +43,7 @@ const nf = (lang: Lang) => new Intl.NumberFormat(lang === 'ar' ? 'ar-u-nu-latn' 
 // ------------------------------------------------------------------ labels (kept apart from the bot messages; parity is tested)
 const L = {
   en: {
+    build: 'Build', buildWar: 'War', buildEco: 'Economy', buildHybrid: 'Hybrid', scoreWar: 'War', scoreEco: 'Eco',
     country: 'Country', level: 'Level', xp: 'XP', prestige: 'Prestige', rank: 'Military rank', damage: 'Total damage', damagePeriods: 'Recent damage',
     today: 'Today', week: 'Week', month: 'Month', offices: 'Government', party: 'Party', unit: 'Military unit', activity: 'Activity', work: 'Work', trade: 'Trade', companies: 'Companies',
     next: 'Next', remaining: 'remaining', topRank: 'Highest rank reached', noRank: 'No rank yet', needs: 'needs', leader: 'Leader', commander: 'Commander', unavailable: 'Not available',
@@ -50,6 +51,7 @@ const L = {
     office_president: 'President', office_vicePresident: 'Vice President', office_ministerDefense: 'Minister of Defense', office_ministerEconomy: 'Minister of Economy', office_congress: 'Congress member',
   },
   ar: {
+    build: 'البناء', buildWar: 'حرب', buildEco: 'اقتصاد', buildHybrid: 'هجين', scoreWar: 'حرب', scoreEco: 'اقتصاد',
     country: 'الدولة', level: 'المستوى', xp: 'الخبرة', prestige: 'الهيبة', rank: 'الرتبة العسكرية', damage: 'إجمالي الضرر', damagePeriods: 'الضرر الأخير',
     today: 'اليوم', week: 'الأسبوع', month: 'الشهر', offices: 'الحكومة', party: 'الحزب', unit: 'الوحدة العسكرية', activity: 'النشاط', work: 'العمل', trade: 'التجارة', companies: 'الشركات',
     next: 'التالية', remaining: 'متبقٍّ', topRank: 'أعلى رتبة', noRank: 'بلا رتبة بعد', needs: 'تتطلب', leader: 'رئيس الحزب', commander: 'قائد الوحدة', unavailable: 'غير متوفر',
@@ -94,6 +96,13 @@ export function buildProfileEmbed(i: ProfileCardInput): EmbedJson {
 
   if (p.countryId) add(`🌍 ${t.country}`, `\`${clip(p.countryId, 40).replace(/`/g, '')}\``);
   if (p.level !== null) add(`⭐ ${t.level}`, `${n.format(p.level)}${p.xp !== null ? ` · ${t.xp} ${n.format(p.xp)}` : ''}${p.prestige ? ` · ✨ ${t.prestige} ${n.format(p.prestige)}` : ''}`);
+
+  // Skill-based build (shared classifier). Only a definite War / Eco / Hybrid is shown; insufficient or unclassified data shows nothing.
+  const build = classifyBuild(p.skills);
+  if ((build.kind === 'war' || build.kind === 'eco' || build.kind === 'hybrid') && build.warScore !== null && build.ecoScore !== null) {
+    const nm = build.kind === 'war' ? t.buildWar : build.kind === 'eco' ? t.buildEco : t.buildHybrid;
+    add(`🧬 ${t.build}`, `**${nm}**\n${t.scoreWar} ${n.format(Math.round(build.warScore))} · ${t.scoreEco} ${n.format(Math.round(build.ecoScore))}`);
+  }
 
   const total = st?.damage.all ?? p.damage.total;                          // all-time damage: stats first, profile as the documented alternative
   if (i.ranksEnabled && total !== null) {

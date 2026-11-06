@@ -232,3 +232,16 @@ describe('player card mappers (for /profile)', () => {
     expect((await c.playerCard('../x')).profile.status).toBe('error');
   });
 });
+
+describe('skills in the player profile', () => {
+  const skills = [{ code: 'attack', level: 3, maxLevel: 10 }, { code: 'production', level: 5, maxLevel: 10 }];
+  it('passes the skills array through untouched; null when absent or not an array', () => {
+    const p = extractPlayerProfile(ok({ ...profileAbuDujana, skills })); expect(p.status === 'ok' && p.data.skills).toEqual(skills);
+    for (const bad of [undefined, null, 'x', { attack: 1 }, 7]) { const r = extractPlayerProfile(ok({ ...profileAbuDujana, skills: bad })); expect(r.status === 'ok' && r.data.skills).toBeNull(); }
+  });
+  it('also reaches the /profile card model; a failed request carries no skills', async () => {
+    const { extractProfileCard } = await import('../src/index.js');
+    const c = extractProfileCard(ok({ ...profileAbuDujana, skills })); expect(c.status === 'ok' && c.data.skills).toEqual(skills);
+    expect(extractPlayerProfile({ status: 'rate_limited', retryAfterMs: 1 })).toEqual({ status: 'rate_limited', retryAfterMs: 1 });
+  });
+});

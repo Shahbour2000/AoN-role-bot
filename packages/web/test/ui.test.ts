@@ -393,3 +393,26 @@ describe('static assets (CSP + safety)', () => {
     expect(read('app.css')).not.toMatch(/(^|[;{\s])(margin|padding)-(left|right)\s*:|text-align\s*:\s*(left|right)|\b(left|right)\s*:\s*\d/);
   });
 });
+
+describe('player build roles page', () => {
+  const sel = (p: Page, k: string) => p.$(`#build-${k}`) as HTMLSelectElement;
+  it('always shows the three entries, explains an unset build, and saves the chosen roles', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`);
+    await waitFor(() => p.$('#build-war'), 'form');
+    expect(['war', 'eco', 'hybrid'].every((k) => p.$(`#card-${k}`))).toBe(true); expect(p.$('#card-war')!.textContent).toContain('غير محدد');
+    sel(p, 'war').value = '900001'; sel(p, 'war').dispatchEvent(new p.win.Event('change', { bubbles: true })); sel(p, 'eco').value = '900002'; sel(p, 'eco').dispatchEvent(new p.win.Event('change', { bubbles: true }));
+    click(p, p.$('#builds-save')); await waitFor(() => p.calls.some((x) => x.method === 'PUT' && x.url.endsWith('/builds') && x.status === 200), 'saved');
+    const { getBuildRoles } = await import('@aon/db'); expect(await getBuildRoles(c.db, G1)).toEqual({ war: '900001', eco: '900002', hybrid: null });
+  });
+  it('the same role for two builds disables saving and shows why; the rules are explained in the selected language', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`); await waitFor(() => p.$('#build-war'), 'form');
+    for (const k of ['war', 'eco']) { sel(p, k).value = '900001'; sel(p, k).dispatchEvent(new p.win.Event('change', { bubbles: true })); }
+    expect((p.$('#builds-save') as HTMLButtonElement).disabled).toBe(true); expect(p.$('#card-eco')!.textContent).toContain('الدور نفسه');
+    expect(p.$('details')!.textContent).toContain('نتيجة الحرب');
+  });
+  it('roles used as military ranks or mappings are not selectable', async () => {
+    const { c, l } = await setup(); await c.app.inject({ method: 'POST', url: `/api/guilds/${G1}/mappings`, headers: { ...l.headers, cookie: `aon_session=${l.cookies['aon_session']}`, 'content-type': 'application/json' }, payload: JSON.stringify({ kind: 'president', discordRoleId: '900002' }) });
+    const p = await openApp(c, l, `#/g/${G1}/builds`); await waitFor(() => p.$('#build-war'), 'form');
+    expect((([...sel(p, 'war').options].find((o) => o.value === '900002')) as HTMLOptionElement).disabled).toBe(true);
+  });
+});
