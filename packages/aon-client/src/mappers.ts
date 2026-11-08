@@ -31,6 +31,7 @@ export const MAPPING_STATUS = {
   partiesList: 'verified',
   unitsList: 'verified',
   governmentRoster: 'verified',
+  countriesList: 'unverified',      // GET /countries shape NOT sampled: tolerant extractor, display names only
   alliance: 'unverified',
   partyMemberList: 'unverified',
   unitMemberList: 'unverified',
@@ -333,4 +334,24 @@ export function extractStatsCard(res: Fetched<unknown>): Fetched<StatsCard> {
     damage: { all: dm['all']!, day: dm['day']!, week: dm['week']!, month: dm['month']! }, work: { all: w['all']!, day: w['day']!, week: w['week']!, month: w['month']! },
     trade: { all: t['all']!, day: t['day']!, week: t['week']!, month: t['month']! }, companies: isObj(b['companies']) ? numOrNull(b['companies']['count']) : null,
   } };
+}
+
+
+/**
+ * GET /countries — the response shape is NOT documented (the OpenAPI file only says "object") and has not been sampled, so this is a
+ * deliberately tolerant extractor: an array, or an object holding a `countries` array, of items with a string `id` and string `name`.
+ * It is used for DISPLAY NAMES only (never for eligibility). Anything else => `incomplete`, and callers then show no country row.
+ */
+export function extractCountryNames(res: Fetched<unknown>): Fetched<Map<string, string>> {
+  if (res.status !== 'ok') return res as Fetched<never>;
+  const body = res.data;
+  const list = Array.isArray(body) ? body : isObj(body) && Array.isArray(body.countries) ? body.countries : null;
+  if (!list) return { status: 'incomplete', missing: ['countries (unrecognised shape)'] };
+  const out = new Map<string, string>();
+  for (const c of list) {
+    if (!isObj(c)) continue;
+    const id = idString(c.id); const name = typeof c.name === 'string' ? c.name.trim() : '';
+    if (id && name) out.set(id, name);
+  }
+  return out.size ? { status: 'ok', data: out } : { status: 'incomplete', missing: ['countries (no id/name pairs)'] };
 }

@@ -165,9 +165,14 @@ describe('/profile', () => {
     const e = embedOf(c);
     expect(e.title).toContain('AbuDujana'); expect(e.thumbnail!.url).toBe('https://app.ageofnations.world/media/8d126155650a12155d333ec5.gif'); expect(validateEmbed(e)).toEqual([]);
     const f = Object.fromEntries(e.fields!.map((x) => [x.name, x.value]));
-    expect(f['🌍 Country']).toContain('eg'); expect(f['⭐ Level']).toContain('17'); expect(f['⚔️ Total damage']).toBe('649,601');
+    expect(f['🌍 Country']).toBe('Egypt'); expect(f['⭐ Level']).toContain('17'); expect(f['⚔️ Total damage']).toBe('649,601');
     expect(f['📅 Recent damage']).toContain('625,446'); expect(f['🏛️ Government']).toContain('Vice President'); expect(f['🎖️ Party']).toContain('Leader'); expect(f['🛡️ Military unit']).toContain('Commander');
     expect(f['📊 Activity']).toContain('7,354'); expect(Object.keys(f).some((k) => k.includes('Military rank'))).toBe(false);   // rank system off => no rank
+  });
+  it('an unresolved country name omits the country row instead of showing the raw country id', async () => {
+    const h = await withLink(); (h.game as unknown as { countryNames: Map<string, string> }).countryNames.clear();
+    const c = inv({ group: 'profile' }); await handleCommand(h.deps, c.i); const e = embedOf(c);
+    expect(e.fields!.some((x) => x.name.includes('Country'))).toBe(false); expect(JSON.stringify(e)).not.toMatch(/`eg`|\beg\b/);
   });
   it('works with the military system disabled, and shows the rank + progress when it is enabled (per server)', async () => {
     const on = await withLink({ ranks: true }); const c = inv({ group: 'profile' }); await handleCommand(on.deps, c.i);

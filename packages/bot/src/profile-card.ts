@@ -70,6 +70,8 @@ export interface ProfileCardInput {
   ladder: readonly RankDefinition[]; ranksEnabled: boolean;
   /** Where relative avatar paths (`/media/...`) live. UNVERIFIED assumption, configurable (AON_MEDIA_BASE_URL). */
   mediaBaseUrl: string;
+  /** Resolved country display name. When null/undefined the country row is OMITTED: a raw country ID is never shown. */
+  countryName?: string | null | undefined;
   now?: Date;
 }
 
@@ -94,7 +96,7 @@ export function buildProfileEmbed(i: ProfileCardInput): EmbedJson {
   const fields: EmbedField[] = [];
   const add = (name: string, value: string, inline = true) => { if (value.trim()) fields.push({ name: clip(name, EMBED_LIMITS.fieldName), value: clip(value, EMBED_LIMITS.fieldValue), inline }); };
 
-  if (p.countryId) add(`🌍 ${t.country}`, `\`${clip(p.countryId, 40).replace(/`/g, '')}\``);
+  if (i.countryName) add(`🌍 ${t.country}`, esc(clip(i.countryName, 60)));
   if (p.level !== null) add(`⭐ ${t.level}`, `${n.format(p.level)}${p.xp !== null ? ` · ${t.xp} ${n.format(p.xp)}` : ''}${p.prestige ? ` · ✨ ${t.prestige} ${n.format(p.prestige)}` : ''}`);
 
   // Skill-based build (shared classifier). Only a definite War / Eco / Hybrid is shown; insufficient or unclassified data shows nothing.

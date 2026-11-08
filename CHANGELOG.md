@@ -1,3 +1,39 @@
+# CHANGELOG — Delivery 2: audit + alliance/country-name corrections
+
+Base: repository `Shahbour2000/AoN-role-bot` at commit `5d36246`. Extract over it; **no files are deleted**. No migration, no new environment variable, no manual step.
+This is a small, verified correction delivery. **The large redesign / verification / proxy / reservation / designer work is NOT in this ZIP and is not started** (see docs/AUDIT.md).
+
+## Complete and verified (by tests listed below)
+- **Alliance is no longer offered in setup.** The type selector now lists General / Country / Party / Military unit; the disabled "alliance" module checkbox, the
+  "alliance not available yet" notes and the alliance group in the role-mapping selector are gone. A guild that already stores `alliance` shows it only as a
+  disabled, localized **Closed** option (`مغلق` / `Closed`). Data and backend code are untouched. This also removes the frontend/backend mismatch (saving failed
+  because the API rejects `alliance`).
+- **`/profile` never shows a country ID.** It shows the country **name** when it can be resolved and omits the row otherwise (name is escaped and clipped).
+  `AonClient.countryName(id)` resolves it from `GET /countries` with a 6 h cache and serves the stale cache on failure.
+- Audit document `docs/AUDIT.md` (findings, evidence limits, requirements checklist).
+
+## Not done / limitations (honest)
+- **Country flag: not implemented.** `GET /countries` has never been sampled; no verified flag/ISO field exists. The name extractor (`extractCountryNames`) is
+  **tolerant and UNVERIFIED** (array or `{countries:[{id,name}]}`); if the real shape differs the country row is simply omitted. Please send one real
+  `GET /countries` response.
+- **War/Eco/Hybrid is unverified**: the real profile sample in the fixtures has **no `skills` array**, and the skill groups/thresholds are provisional. Behaviour is
+  non-destructive (no skills → no change). Needs a real profile containing skills and your approval of the formula.
+- The game API was unreachable from the sandbox: nothing was run against the live API, real Discord, a real browser, or Docker.
+
+## Tests actually run (this session)
+- `npm run typecheck` (tsc --strict, all packages): 0 errors.
+- `@aon/client` (vitest): 53 passed (51 before + 2 new). `@aon/bot`: 84 passed (80 + 4 new). `@aon/web`: 114 passed (includes 1 new + 2 updated UI tests, jsdom).
+- `@aon/core` (79 passed) was run before the changes, on unchanged code. `@aon/db` and `@aon/sync` were **not changed and their full run did not finish within the sandbox time limit** → not re-verified in this session.
+- Not run: real PostgreSQL, real browser, live API.
+
+## Changed / new files
+- `docs/AUDIT.md` (new)
+- `packages/aon-client/src/mappers.ts`, `src/client.ts`, `test/mappers.test.ts` — `extractCountryNames`, `countryName()`
+- `packages/bot/src/profile-card.ts`, `src/handlers.ts`, `test/profile-card.test.ts`, `test/handlers.test.ts`, `test/bot-harness.ts` — name-only country row
+- `packages/web/public/app.js`, `public/i18n.js`, `test/ui.test.ts` — alliance removal, `closed` string
+
+---
+
 # CHANGELOG — Phase 1: Player Build Roles (War / Eco / Hybrid) + new logo
 
 Base: the project as last delivered (commit `1213f3f`). Extract this ZIP over it; **no files are deleted**.

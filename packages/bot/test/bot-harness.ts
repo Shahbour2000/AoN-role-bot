@@ -9,6 +9,8 @@ export class BotGame extends FakeGame {
   names = new Map<string, Fetched<PlayerIdentity>>();
   cards = new Map<string, { profile: Fetched<ProfileCard>; stats: Fetched<StatsCard> }>();
   cardRequests = 0;
+  countryNames = new Map<string, string>([['eg', 'Egypt']]);
+  async countryName(id: string) { return this.countryNames.get(id) ?? null; }
   async playerCard(id: string) { this.cardRequests++; return this.cards.get(id) ?? { profile: { status: 'not_found' as const }, stats: { status: 'not_found' as const } }; }
   async playerByName(u: string) { return this.names.get(u.toLowerCase()) ?? ({ status: 'not_found' } as const); }
   override async playerProfile(id: string) { return (await super.playerProfile(id)) as never; }

@@ -187,7 +187,7 @@ describe('dashboard UI against the real backend (jsdom)', () => {
 });
 
 describe('server setup page', () => {
-  it('choosing a community type pre-selects its modules (editable), alliance is shown as unavailable and cannot be ticked', async () => {
+  it('choosing a community type pre-selects its modules (editable); alliance is not offered anywhere in setup', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/setup`);
     await waitFor(() => p.$('#mod-government'), 'form');
     const box = (id: string) => p.$(id) as HTMLInputElement; const type = p.$$('.card select')[1] as HTMLSelectElement;
@@ -196,8 +196,16 @@ describe('server setup page', () => {
     expect(p.$('#preset-note')!.hasAttribute('hidden')).toBe(false);
     type.value = 'military_unit'; type.dispatchEvent(new p.win.Event('change', { bubbles: true }));
     expect([box('#mod-government').checked, box('#mod-party').checked, box('#mod-unit').checked]).toEqual([false, false, true]);
-    expect(box('#mod-alliance').disabled).toBe(true); expect(box('#mod-alliance').checked).toBe(false);
-    expect(p.$('#alliance-note')!.textContent).toContain('غير متاحة بعد');
+    expect(p.$('#mod-alliance')).toBeNull(); expect(p.$('#alliance-note')).toBeNull();
+    expect([...type.options].map((o) => o.value)).toEqual(['general', 'country', 'party', 'military_unit']);   // no alliance option
+    expect(p.$('.card')!.textContent).not.toContain('تحالف');
+  });
+  it('a legacy guild that already stores the alliance type sees only a disabled, localized "Closed" option (no "coming soon")', async () => {
+    const { c, l } = await setup();
+    await c.db.query(`UPDATE guilds SET community_type='alliance' WHERE guild_id=$1`, [G1]);
+    const p = await openApp(c, l, `#/g/${G1}/setup`); await waitFor(() => p.$('#mod-government'), 'form');
+    const type = p.$$('.card select')[1] as HTMLSelectElement; const o = [...type.options].find((x) => x.value === 'alliance')!;
+    expect(o.disabled).toBe(true); expect(o.textContent).toContain('مغلق'); expect(o.textContent).not.toMatch(/قريب|بعد/);
   });
   it('saves link mode, the unit-leader option and modules; the military system stays an independent switch', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/setup`);
@@ -219,10 +227,9 @@ describe('role mappings page', () => {
   it('groups kinds by community type, includes party roles, and offers no alliance mapping', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/roles`);
     await waitFor(() => p.$('#map-kind'), 'form'); const g = opts(p);
-    expect(g.map((x) => x[0])).toEqual(['سيرفر الدولة', 'سيرفر الحزب', 'سيرفر الوحدة العسكرية', 'سيرفر التحالف (غير متاح بعد)']);
+    expect(g.map((x) => x[0])).toEqual(['سيرفر الدولة', 'سيرفر الحزب', 'سيرفر الوحدة العسكرية']);
     expect(g[0]![1]).toEqual(['president', 'vice_president', 'minister_defense', 'minister_foreign', 'minister_economy', 'congress', 'citizen', 'government_role']);
     expect(g[1]![1]).toEqual(['party_leader', 'party_role', 'party_member']); expect(g[2]![1]).toEqual(['unit_leader', 'unit_member']);
-    expect(g[3]![1]).toEqual(['']); expect(p.$('#map-kind optgroup:last-child option')!.hasAttribute('disabled')).toBe(true);       // not selectable
     expect([...p.$$('#map-kind option')].some((o) => (o.getAttribute('value') ?? '').startsWith('alliance'))).toBe(false);
   });
   it('kinds that need the game value refuse to submit without it; values the bot saw in the last sync are offered as one-click chips', async () => {

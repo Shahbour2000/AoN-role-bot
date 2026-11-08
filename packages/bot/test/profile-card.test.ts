@@ -19,7 +19,7 @@ describe('Discord embed validity', () => {
   });
   it('hostile / enormous game data can never produce an invalid embed (every length clipped, total ≤ 6000)', () => {
     const huge = 'ж'.repeat(5000);
-    const e = build({ ranksEnabled: true, ladder: DEFAULT_RANKS.map((r) => ({ ...r, nameEn: huge, nameAr: huge })), profile: card({
+    const e = build({ countryName: huge, ranksEnabled: true, ladder: DEFAULT_RANKS.map((r) => ({ ...r, nameEn: huge, nameAr: huge })), profile: card({
       username: huge, countryId: huge, offices: Array.from({ length: 80 }, (_, i) => `office${i}${huge}`), party: { id: 'p', name: huge, role: huge }, militaryUnit: { id: 'm', name: huge, role: huge } }) });
     expect(validateEmbed(e)).toEqual([]);
     expect(JSON.stringify(e).length).toBeGreaterThan(0); expect(e.title!.length).toBeLessThanOrEqual(EMBED_LIMITS.title);
@@ -27,7 +27,7 @@ describe('Discord embed validity', () => {
   });
   it('when the embed would be too big the LOWEST-priority fields are dropped first, never the core ones', () => {
     const huge = 'x'.repeat(900);
-    const e = build({ ranksEnabled: true, ladder: DEFAULT_RANKS.map((r) => ({ ...r, nameEn: huge })), profile: card({ offices: [huge], party: { id: 'p', name: huge, role: huge }, militaryUnit: { id: 'm', name: huge, role: huge } }) });
+    const e = build({ countryName: 'Egypt', ranksEnabled: true, ladder: DEFAULT_RANKS.map((r) => ({ ...r, nameEn: huge })), profile: card({ offices: [huge], party: { id: 'p', name: huge, role: huge }, militaryUnit: { id: 'm', name: huge, role: huge } }) });
     expect(validateEmbed(e)).toEqual([]);
     expect(e.fields![0]!.name).toContain('Country');                                  // the first (highest-priority) fields survive
   });
@@ -64,7 +64,7 @@ describe('content', () => {
     expect(field(build({ profile: card({ party: { id: 'p', name: 'P', role: 'treasurer' } }) }), 'Party')!.value).toContain('treasurer');
   });
   it('uses latin digits in Arabic and Arabic labels', () => {
-    const e = build({ lang: 'ar' });
+    const e = build({ lang: 'ar', countryName: 'مصر' });
     expect(field(e, 'إجمالي الضرر')!.value).toMatch(/^[0-9٬,.\s]+$/); expect(field(e, 'الدولة')).toBeDefined();
   });
   it('Arabic and English label sets are identical', () => { expect(PROFILE_LABEL_KEYS.ar.sort()).toEqual(PROFILE_LABEL_KEYS.en.sort()); });
@@ -123,5 +123,17 @@ describe('skill-based build on the card', () => {
   it('omits the field for unclassified or insufficient data (never forces a build)', () => {
     expect(field(withSkills(sk(10, 10)), 'Build')).toBeUndefined(); expect(field(withSkills(undefined), 'Build')).toBeUndefined(); expect(field(withSkills([{ code: 'attack', level: 1, maxLevel: 0 }]), 'Build')).toBeUndefined();
     expect(validateEmbed(withSkills(sk(80, 20)))).toEqual([]);
+  });
+});
+
+describe('country row (name only, never the raw ID)', () => {
+  it('shows the resolved name and never the country id', () => {
+    const e = build({ countryName: 'Egypt' }); expect(field(e, 'Country')!.value).toBe('Egypt'); expect(JSON.stringify(e)).not.toContain('`eg`');
+  });
+  it('is omitted when the name is unknown, even though the profile has a countryId', () => {
+    for (const countryName of [undefined, null, '']) { const e = build({ countryName }); expect(field(e, 'Country')).toBeUndefined(); expect(JSON.stringify(e.fields)).not.toMatch(/\beg\b/); }
+  });
+  it('escapes markdown/mentions in the name and keeps the embed valid for an enormous one', () => {
+    const e = build({ countryName: '@everyone **x**' + 'y'.repeat(5000) }); expect(validateEmbed(e)).toEqual([]); expect(field(e, 'Country')!.value).not.toContain('@everyone');
   });
 });

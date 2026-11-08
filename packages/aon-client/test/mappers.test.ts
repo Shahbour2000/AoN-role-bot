@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AonClient, citizenshipOf, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster,
+  AonClient, citizenshipOf, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractCountryNames, extractGovernmentRoster,
   extractParties, extractPlayer, extractPlayerProfile, extractUnits, rolesByPlayer,
 } from '../src/index.js';
 import { citizensPages, parties, profileAbuDujana, profileNoAffiliation, rosterAbbreviated, rosterComplete, statsAbuDujana, units } from './fixtures.js';
@@ -243,5 +243,17 @@ describe('skills in the player profile', () => {
     const { extractProfileCard } = await import('../src/index.js');
     const c = extractProfileCard(ok({ ...profileAbuDujana, skills })); expect(c.status === 'ok' && c.data.skills).toEqual(skills);
     expect(extractPlayerProfile({ status: 'rate_limited', retryAfterMs: 1 })).toEqual({ status: 'rate_limited', retryAfterMs: 1 });
+  });
+});
+
+describe('extractCountryNames (tolerant; GET /countries shape is UNVERIFIED, fixtures are synthetic)', () => {
+  it('accepts an array or { countries: [...] } and keeps only id+name pairs', () => {
+    const arr = extractCountryNames(ok([{ id: 'eg', name: 'Egypt' }, { id: 'pl', name: ' Poland ' }, { id: 'x' }, null, { name: 'no id' }]));
+    expect(arr.status === 'ok' && [...arr.data]).toEqual([['eg', 'Egypt'], ['pl', 'Poland']]);
+    const obj = extractCountryNames(ok({ countries: [{ id: 'eg', name: 'Egypt' }] })); expect(obj.status === 'ok' && obj.data.get('eg')).toBe('Egypt');
+  });
+  it('unknown shapes and empty lists are incomplete; non-ok results pass through unchanged', () => {
+    expect(extractCountryNames(ok({ nope: 1 })).status).toBe('incomplete'); expect(extractCountryNames(ok([])).status).toBe('incomplete');
+    expect(extractCountryNames({ status: 'rate_limited', retryAfterMs: 5 })).toEqual({ status: 'rate_limited', retryAfterMs: 5 });
   });
 });

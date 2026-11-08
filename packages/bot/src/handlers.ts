@@ -38,6 +38,8 @@ export interface BotDeps {
   game: GameData & {
     playerByName(u: string): Promise<Fetched<PlayerIdentity>>; playerProfile(id: string): Promise<Fetched<{ id: string; username: string | null }>>;
     playerCard(id: string): Promise<{ profile: Fetched<ProfileCard>; stats: Fetched<StatsCard> }>;
+    /** Optional: display name of a country (null when unknown). */
+    countryName?(id: string): Promise<string | null>;
   };
   verifier?: OwnershipVerifier;
   /** Where relative avatar paths live (UNVERIFIED assumption about the game's media host; configurable). */
@@ -148,7 +150,8 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
       if (card.profile.status === 'not_found') return inv.reply({ content: t(lang, 'profile_player_missing') });   // the link is kept
       if (card.profile.status !== 'ok') return inv.reply({ content: t(lang, 'api_down') });
       const ranksEnabled = cfg.modules.ranks;
-      const embed = buildProfileEmbed({ lang, profile: card.profile.data, stats: card.stats.status === 'ok' ? card.stats.data : null, ladder: ranksEnabled ? await getLadder(deps.db, inv.guildId) : [], ranksEnabled, mediaBaseUrl: deps.mediaBaseUrl ?? 'https://app.ageofnations.world', now: (deps.now ?? (() => new Date()))() });
+      const countryName = card.profile.data.countryId && deps.game.countryName ? await deps.game.countryName(card.profile.data.countryId).catch(() => null) : null;
+      const embed = buildProfileEmbed({ lang, countryName, profile: card.profile.data, stats: card.stats.status === 'ok' ? card.stats.data : null, ladder: ranksEnabled ? await getLadder(deps.db, inv.guildId) : [], ranksEnabled, mediaBaseUrl: deps.mediaBaseUrl ?? 'https://app.ageofnations.world', now: (deps.now ?? (() => new Date()))() });
       return inv.reply({ content: '', embed });
     }
     case 'link-status/link-status': {

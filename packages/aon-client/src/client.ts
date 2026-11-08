@@ -1,6 +1,6 @@
 import type { Fetched } from '@aon/core';
 import { AonHttp, type HttpClientOptions } from './http.js';
-import { extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
+import { extractCountryNames, extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
 
 const ID = /^[A-Za-z0-9_-]{1,80}$/;
 const bad = (what: string): Fetched<never> => ({ status: 'error', message: `invalid ${what}` });
@@ -13,6 +13,19 @@ export class AonClient {
   }
 
   countries() { return this.http.get('/countries'); }
+
+  private countryNameCache: { at: number; names: Map<string, string> } | null = null;
+  /** Display name of a country, or null when unknown/unavailable (callers then omit the row; they never show the raw ID). Cached 6 h. */
+  async countryName(id: string): Promise<string | null> {
+    if (!ID.test(id)) return null;
+    const now = Date.now();
+    if (!this.countryNameCache || now - this.countryNameCache.at > 6 * 3_600_000) {
+      const res = extractCountryNames(await this.countries());
+      if (res.status !== 'ok') return this.countryNameCache?.names.get(id) ?? null;      // keep serving the stale cache on failure
+      this.countryNameCache = { at: now, names: res.data };
+    }
+    return this.countryNameCache.names.get(id) ?? null;
+  }
   countrySummary(id: string) { return ID.test(id) ? this.http.get(`/countries/${id}/summary`) : Promise.resolve(bad('countryId')); }
   async countryUnits(id: string): Promise<Fetched<UnitSummary[]>> { return ID.test(id) ? extractUnits(await this.http.get(`/countries/${id}/units`)) : bad('countryId'); }
   async countryParties(id: string): Promise<Fetched<PartySummary[]>> { return ID.test(id) ? extractParties(await this.http.get(`/countries/${id}/parties`)) : bad('countryId'); }

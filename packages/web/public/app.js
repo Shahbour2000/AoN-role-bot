@@ -87,19 +87,20 @@
   }
 
   // ---------------------------------------------------------------- setup (settings)
-  const TYPE_PRESETS = { country: { government: true, party: false, unit: false }, party: { government: false, party: true, unit: false }, military_unit: { government: false, party: false, unit: true }, alliance: { government: false, party: false, unit: false }, general: { government: true, party: false, unit: false } };
+  const TYPE_PRESETS = { country: { government: true, party: false, unit: false }, party: { government: false, party: true, unit: false }, military_unit: { government: false, party: false, unit: true }, general: { government: true, party: false, unit: false } };
   async function setup(g) {
     const r = await api('GET', `/api/guilds/${g}/settings`);
     if (!r.ok) return [el('p', { class: 'err', text: errText(r) })];
     const s = r.data.settings;
     const sel = (opts, v, tk) => { const x = el('select', {}, opts.map((o) => el('option', { value: o, text: t(`${tk}${o}`) }))); x.value = v; return x; };
     const lang = el('select', {}, el('option', { value: 'ar', text: 'العربية' }), el('option', { value: 'en', text: 'English' })); lang.value = s.language;
-    const type = sel(['general', 'country', 'party', 'military_unit', 'alliance'], s.communityType, 'type_');
+    // Alliance is NOT a configurable type. A guild that already stores it (legacy) sees it only as a disabled, localized "Closed" option.
+    const type = sel(['general', 'country', 'party', 'military_unit'], s.communityType, 'type_');
+    if (s.communityType === 'alliance') { type.append(el('option', { value: 'alliance', disabled: true, text: `${t('type_alliance')} — ${t('closed')}` })); type.value = 'alliance'; }
     const ids = Object.fromEntries([['countryId', 'set_country'], ['partyId', 'set_party'], ['unitId', 'set_unit']].map(([k, l]) => [k, el('input', { class: 'wide', value: s[k] || '', maxlength: 80, 'aria-label': t(l) })]));
     const dem = sel(['never', 'immediate', 'grace'], s.demotion.mode, 'dem_');
     const grace = el('input', { type: 'number', min: 1, max: 365, value: s.demotion.graceDays || 7 });
     const mods = Object.fromEntries(['government', 'party', 'unit', 'ranks'].map((m) => [m, el('input', { type: 'checkbox', checked: s.modules[m], id: `mod-${m}` })]));
-    const allianceBox = el('input', { type: 'checkbox', disabled: true, id: 'mod-alliance', 'aria-describedby': 'alliance-note' });
     const presetNote = el('p', { class: 'muted', id: 'preset-note', hidden: true, text: t('type_preset_note') });
     type.addEventListener('change', () => { const p = TYPE_PRESETS[type.value]; if (p) { for (const [k, v] of Object.entries(p)) mods[k].checked = v; presetNote.hidden = false; } });
     const linkMode = sel(['direct', 'staff_approval'], s.linkMode, 'lm_');
@@ -114,8 +115,7 @@
       el('div', { class: 'row' }, field(t('set_language'), lang), field(t('set_type'), type)), presetNote,
       el('div', { class: 'row' }, Object.entries(ids).map(([k, inp], i) => field(t(['set_country', 'set_party', 'set_unit'][i]), inp))),
       el('h3', { text: t('set_modules') }),
-      el('div', { class: 'row' }, [...Object.entries(mods).map(([k, inp]) => el('label', {}, inp, ' ', t(`mod_${k}`))), el('label', { class: 'muted' }, allianceBox, ' ', t('mod_alliance'))]),
-      el('p', { class: 'muted', id: 'alliance-note', text: t('alliance_unavailable') }),
+      el('div', { class: 'row' }, Object.entries(mods).map(([k, inp]) => el('label', {}, inp, ' ', t(`mod_${k}`)))),
       el('div', { class: 'row' }, field(t('set_demotion'), dem), field(t('set_grace'), grace)),
       el('div', { class: 'row' }, field(t('set_link_mode'), linkMode)), el('p', { class: 'muted', text: t('lm_note') }),
       el('div', { class: 'row' }, el('label', {}, unitLeader, ' ', t('set_unit_leader'))),
@@ -139,7 +139,7 @@
     const job = st.ok ? (st.data.lastSuccess || st.data.lastJob) : null; const seen = (job && job.details && job.details.seenRoles) || { party: {}, unit: {}, governmentUnknown: [] };
     const body = el('tbody', {}, m.data.mappings.map((x) => el('tr', {}, el('td', { text: t(`k_${x.kind}`) }), el('td', { text: x.gameRef || '—' }), el('td', { text: names.get(x.discordRoleId) || x.discordRoleId }),
       el('td', {}, el('button', { class: 'btn danger', type: 'button', text: t('remove'), onclick: async () => { const res = await api('DELETE', `/api/guilds/${g}/mappings/${x.id}`); if (res.ok) route(); else toast(errText(res), true); } })))));
-    const kind = el('select', { id: 'map-kind' }, KIND_GROUPS.map(([gl, ks]) => el('optgroup', { label: t(gl) }, ks.map((k) => el('option', { value: k, text: t(`k_${k}`) })))), el('optgroup', { label: t('grp_alliance') }, el('option', { value: '', disabled: true, text: t('alliance_unavailable') })));
+    const kind = el('select', { id: 'map-kind' }, KIND_GROUPS.map(([gl, ks]) => el('optgroup', { label: t(gl) }, ks.map((k) => el('option', { value: k, text: t(`k_${k}`) })))));
     const ref = el('input', { class: 'wide', maxlength: 80, id: 'map-ref' }); const role = roleSelect(roles, '', false, rankRoles);
     const chips = el('div', { id: 'seen-values', class: 'row' });
     const refreshChips = () => {
@@ -154,7 +154,7 @@
     } });
     return [m.data.mappings.length ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, [t('map_kind'), t('map_ref'), t('map_role'), ''].map((h) => el('th', { text: h })))), body)) : el('div', { class: 'empty', text: t('map_none') }),
       el('div', { class: 'card' }, el('div', { class: 'row' }, field(t('map_kind'), kind), field(t('map_ref'), ref), field(t('map_role'), role), add), chips,
-        el('p', { class: 'muted', text: t('map_country_hint') }), el('p', { class: 'muted', text: t('map_entity_hint') }), el('p', { class: 'muted', text: t('alliance_unavailable') }))];
+        el('p', { class: 'muted', text: t('map_country_hint') }), el('p', { class: 'muted', text: t('map_entity_hint') }))];
   }
 
   // ---------------------------------------------------------------- player build roles (War / Eco / Hybrid)
