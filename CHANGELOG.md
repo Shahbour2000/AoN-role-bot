@@ -1,3 +1,77 @@
+# CHANGELOG — Delivery 4: Phase 3 — type-driven setup, searchable selectors, country reservation
+
+**Prerequisite:** Delivery 3 (Phase 2) must already be applied: this ZIP contains full replacements of `app.css`, `app.html`, `app.js`, `i18n.js` and `ui.test.ts`, which build on Delivery 3.
+Base used for this delivery: repository `4b5f4da736ba4479de29e61afbe697fcd8059d4b` **plus the complete Delivery 3 ZIP** (GitHub `main` was still `4b5f4da` when this was prepared). Delivery 3 itself was not modified; no Phase 2 and Phase 3 changes are mixed in the changed-files list below.
+Extract over the project. **No files are deleted.** One new forward-only migration (`0008`) runs automatically at startup.
+
+## Migration 0008_country_reservation.sql
+Creates `country_reservations` (PK `guild_id`, unique `lower(country_id)`), a trigger on `guilds` that maintains it atomically, and back-fills it from existing **country**-type servers (oldest wins; duplicates are left untouched and flagged in the dashboard, nothing is deleted). Idempotent on restart. See `docs/SETUP_AND_RESERVATION.md` for the model, the duplicate-finding query and the unverified API assumptions.
+
+## Complete and verified
+- **Server types**: General / Country / Party / Military unit; Alliance not offered, legacy alliance data preserved. One rules table (`@aon/core` `community.ts`) decides role kinds and modules; the API rejects mappings the type does not offer (`kind_not_allowed_for_type`) and the roles page only lists allowed kinds.
+- **Type change safety**: refused with the exact list of affected mappings until explicitly confirmed (dialog with acknowledgement tick, focus trap, Escape/Cancel change nothing); on confirmation the mappings are removed in the same DB transaction (locked, audited). Build-role and legacy alliance mappings are never removed. Switched-off modules are reported.
+- **Searchable selectors** (`picker.js`, new): accessible combobox (label, listbox, `aria-activedescendant`, live status, arrow/Home/End/Enter/Escape), server-side search and pagination ("Show more"), loading / empty / error+retry / rate-limit / "unrecognised response" states, manual-ID fallback, selected item shown by **name**, raw IDs never listed, stale searches ignored. Country, party (needs a country filter) and unit (country list, or the game's search with 2+ characters).
+- **Country reservation**: database-enforced (see migration), atomic with the settings update (a failed claim rolls back the whole save), case-insensitive, country-type only, audited (`country.reserved` / `country.released`), explicit authorized release (`DELETE /api/guilds/:id/country`), saving an empty country is refused, the other server is never identified in any response. The dashboard states that a reservation is not proof of in-game authority and shows the support contact (`abudujana15`) on conflict.
+- Quality: design system, RTL/LTR and the language-switch state restore keep working (the restore now follows a restored type change that rebuilds the form); dialogs now trap focus (closes a Phase 2 limitation); `[hidden]` always wins in CSS; Arabic and English strings are in parity (418 keys each).
+
+## Tests actually run
+- `tsc --noEmit`: core, db, aon-client, sync, bot, web: 0 errors.
+- **Real PostgreSQL 16 (installed in the sandbox)**: `@aon/db` 91/91 (75 existing + 16 new: uniqueness, case-insensitivity, atomic rollback, true concurrent claims, legacy-duplicate migration, authorized release, cascade, type-change protection); `@aon/web` 169/169; `@aon/core` 85/85; `@aon/client` 60/60; `@aon/bot` 84/84; `@aon/sync` 81/81 (one earlier run showed a single failure in "two simultaneous /sync all"; it passed 3 of 3 re-runs and on the unmodified baseline; not reproduced, treated as a flake, not investigated further).
+- **PGlite (the default `npm test` backend)**: `@aon/db` 91/91 and `@aon/web` 169/169.
+- **Real Chromium against the real app** (real routes and database; fake Discord/game): keyboard selection of a country, save, reservation shown; a second server gets the 409 conflict message and nothing is saved; type change shows the dialog, Escape keeps everything, confirmation removes only the incompatible mapping and releases the reservation; mobile (390 px, Arabic) has no horizontal overflow. Screenshots reviewed; they found the "ID" label, the stray empty bar and the premature "no results" text, all fixed.
+- Test infrastructure fix: DB test helpers now close each real-PostgreSQL pool and drop its database after every test (a long run used to exhaust the server's connection limit).
+
+## Unverified API assumptions (isolated, never presented as confirmed)
+`GET /countries` shape; `GET /units?search=` response shape; `GET /parties/{id}` and `/units/{id}` name field. Each degrades to "name unavailable" or the manual-ID fallback. No flag/image is shown (no verified field; unit `logoUrl` is null in the only sample and its host would be blocked by the CSP).
+
+## Manual deployment steps
+None required: migration 0008 runs at startup. After deploying, run the duplicate query from `docs/SETUP_AND_RESERVATION.md` to see servers that already shared a country; the oldest keeps the reservation, the others see a notice.
+
+## Not done / limitations
+- The `unit_owner` kind, a dedicated treasurer/council kind, proxy citizens, ticket verification, nickname sync, rank/player/audit/diagnostics redesign and the profile designer are later phases.
+- A *general*-type server may store a country (needed for government roles) without reserving it; only country-type servers reserve. Say if general servers should be blocked from using a reserved country's government roles.
+- No owner-only override and no automatic DM/dispute workflow exists (only the documented contact).
+- Names shown by the selectors for the unverified sources depend on the real response shape; if it differs the dashboard falls back to manual ID entry.
+- Not run: live Discord, the live game API, Docker, Firefox/Safari, screen readers.
+
+## Changed / new files
+New: `docs/SETUP_AND_RESERVATION.md`, `packages/core/src/community.ts`, `packages/core/test/community.test.ts`, `packages/db/migrations/0008_country_reservation.sql`, `packages/db/test/reservation.test.ts`, `packages/aon-client/test/entities.test.ts`, `packages/web/public/picker.js`, `packages/web/test/setup.test.ts`
+Modified: `packages/core/src/index.ts`, `packages/db/src/guild-repo.ts`, `packages/db/test/helpers.ts`, `packages/db/test/migrate.test.ts`, `packages/aon-client/src/mappers.ts`, `packages/aon-client/src/client.ts`, `packages/web/src/app.ts`, `packages/web/public/app.css`, `app.html`, `app.js`, `i18n.js`, `packages/web/test/harness.ts`, `packages/web/test/ui.test.ts`, `CHANGELOG.md`
+
+---
+
+# CHANGELOG — Delivery 3: Phase 2 — design system, landing page, dashboard shell
+
+Base: repository `Shahbour2000/AoN-role-bot` at commit `4b5f4da` (Delivery 2 applied). Extract over it. **No files deleted, no migration, no new environment variable, no backend change** (front-end only: `packages/web/public/*` + its tests).
+Verified before starting: Delivery 2 changes present; Phase 1 (build roles, migration 0007, `/builds` routes, branding) intact; `SERVER_PORT` handling untouched.
+
+## Complete and verified
+- **Design system** (`app.css`, rewritten): dark premium theme (navy/near-black, electric blue, violet, cyan accents), tokens, buttons, cards, stat cards, badges, callouts, forms, tables (always scroll inside their container), dialogs, toasts, skeletons. Logical CSS properties only; no inline styles, no remote assets. The light theme and its toggle were **removed** (single dark theme, per the brief). Every existing page inherits the new look through the same class names.
+- **Landing page** (`landing.html/js`): hero with logo and glow, "Open dashboard" / "Add to Discord" actions (invite URL from `/api/public` applied to both buttons), features, server types, getting started, safety/permissions, FAQ, closing CTA. It only describes what exists today (no tickets, proxy citizens, nicknames, alliances).
+- **App shell** (`app.html`, `app.js`): sidebar with grouped, icon navigation (General / Roles / Community / Operations), server switcher (current server + other installed servers + "all servers"), page header with title and one-line description, top bar, footer. Mobile/tablet (<1024 px): off-canvas drawer with scrim, Escape and navigation close it, `aria-expanded` maintained. Routes (`#/g/<id>/<tab>`), OAuth, API calls and page logic are unchanged.
+- **Language switching keeps state** (previously a switch re-rendered the page and discarded unsaved input): the app captures form controls, open `<details>`, focus and scroll before the switch and restores them afterwards; server and tab stay in the URL. A switch never saves anything.
+- **Localization**: new `i18n.js` sections (shell, landing, per-page descriptions, job statuses); Arabic and English have identical keys/placeholders (357 each); icons are built with `createElementNS`, so no markup strings. Overview shows translated job statuses (it showed raw `succeeded` before).
+- **Credit**: `Developed by AbuDujana` is static English text in both HTML files (survives without JS) and the dictionary value is the same English string in Arabic and English (the Arabic dictionary used to translate it).
+- Accessibility: skip link, focus rings, labelled controls, reduced-motion support.
+- Concise copy: alliance wording removed from the landing page; hero/feature/page descriptions rewritten short.
+
+## Tests actually run
+- `@aon/web` (vitest, jsdom, real backend with in-memory Postgres): **128 passed** (114 before + 14 new: shell nav/switcher/drawer, language-state preservation, landing behaviour, credit, design-system static checks). `tsc --noEmit` on `@aon/web`: 0 errors.
+- **Real browser (headless Chromium) screenshots** of landing (AR/EN, 1366 and 390 px), dashboard overview (AR/EN, desktop and mobile), setup (820 px), server list, and the open mobile drawer, against the real `public/` files with a mocked API. They found and I fixed: RTL drawer would not open (CSS specificity), hard-cut hero arc, orphan headline word, orphan feature row, off-centre hero logo, three-row mobile header, English server names truncated at the wrong end in RTL. Document width equalled viewport width in every capture (no horizontal overflow).
+- Not run: other packages (not touched), real Discord OAuth, real API, Docker, real PostgreSQL, Safari/Firefox, a screen reader.
+
+## Known limitations / not done in this delivery
+- Individual pages (setup, roles, ranks, players, sync, audit, diagnostics) were **restyled through the shared components but not redesigned or reorganised**; only overview got stat cards. Setup still uses raw ID text boxes (next phase: searchable selectors).
+- Language-switch restore matches controls by position and only when the page structure is unchanged; transient state not held in form controls (e.g. an in-progress drag) is not restored. An open modal stays in its old language until closed.
+- Dialogs have `role="dialog"` but no focus trap yet.
+- Screenshots used system fonts of the sandbox; Arabic glyph shaping in your browsers may differ slightly.
+- The unused dictionary keys for the old alliance wording and theme toggle remain (harmless).
+
+## Changed files
+`packages/web/public/app.css`, `app.html`, `app.js`, `common.js`, `i18n.js`, `landing.html`, `landing.js`, `packages/web/test/ui.test.ts`, `CHANGELOG.md`
+
+---
+
 # CHANGELOG — Delivery 2: audit + alliance/country-name corrections
 
 Base: repository `Shahbour2000/AoN-role-bot` at commit `5d36246`. Extract over it; **no files are deleted**. No migration, no new environment variable, no manual step.

@@ -1,4 +1,4 @@
-import type { DemotionPolicy } from '@aon/core';
+import { incompatibleMappings, type DemotionPolicy } from '@aon/core';
 import { audit } from './audit.js';
 import type { Db } from './db.js';
 
@@ -77,6 +77,36 @@ export async function removeRoleMapping(db: Db, a: { guildId: string; mappingId:
   });
 }
 
+/** Another server already holds the requested country (raised by the database trigger; nothing was saved). */
+export class CountryReservedError extends Error { readonly code = 'COUNTRY_RESERVED'; constructor() { super('country already reserved by another server'); } }
+/** A type change would orphan role mappings and was not confirmed (nothing was saved). */
+export interface IncompatibleMapping { id: string; kind: string; discordRoleId: string; gameRef: string }
+export class IncompatibleMappingsError extends Error { readonly code = 'INCOMPATIBLE_MAPPINGS'; constructor(readonly mappings: IncompatibleMapping[]) { super('server type change needs confirmation'); } }
+const isCountryConflict = (e: unknown): boolean => typeof e === 'object' && e !== null && (e as { code?: string }).code === '23505' && /country_already_reserved|country_reservations/.test(String((e as { message?: string }).message ?? '') + String((e as { constraint?: string }).constraint ?? ''));
+
+/** This server's reservation (a country server only). `null` = none (including legacy duplicate servers that predate reservations). */
+export async function getCountryReservation(db: Db, guildId: string): Promise<{ countryId: string; reservedAt: Date } | null> {
+  const r = (await db.query<{ country_id: string; reserved_at: Date }>('SELECT country_id, reserved_at FROM country_reservations WHERE guild_id=$1', [guildId])).rows[0];
+  return r ? { countryId: r.country_id, reservedAt: r.reserved_at } : null;
+}
+/** True when SOME OTHER server holds this country. Deliberately returns no identity: other servers' details are never exposed. */
+export async function isCountryReservedByOther(db: Db, guildId: string, countryId: string): Promise<boolean> {
+  return (await db.query('SELECT 1 FROM country_reservations WHERE lower(country_id)=lower($1) AND guild_id<>$2', [countryId, guildId])).rows.length > 0;
+}
+/**
+ * The ONLY way to give a country up: clears the server's country (the trigger releases the reservation in the same statement). Callers must have
+ * authorized the actor for THIS guild. Returns false when the server had no country.
+ */
+export async function releaseCountry(db: Db, guildId: string, actor: string | null): Promise<boolean> {
+  return db.tx(async (t) => {
+    const cur = (await t.query<{ country_id: string | null }>('SELECT country_id FROM guilds WHERE guild_id=$1 FOR UPDATE', [guildId])).rows[0];
+    if (!cur?.country_id) return false;
+    await t.query('UPDATE guilds SET country_id=NULL, updated_at=now() WHERE guild_id=$1', [guildId]);
+    await audit(t, { guildId, actor, action: 'country.released', details: { countryId: cur.country_id } });
+    return true;
+  });
+}
+
 export const SYNC_INTERVALS_MINUTES = [180, 360, 720, 1440] as const;
 const MIN_RESCHEDULE_DELAY_MS = 5 * 60_000;
 
@@ -87,12 +117,27 @@ const MIN_RESCHEDULE_DELAY_MS = 5 * 60_000;
  *    max(last scheduled run + interval, now + 5 min)  (never a burst of immediate runs, never a lost schedule);
  *  - any other change leaves next_sync_at untouched.
  */
-export async function updateGuildSettings(db: Db, guildId: string, patch: Partial<Pick<GuildRow, 'country_id' | 'party_id' | 'unit_id' | 'alliance_id' | 'language' | 'community_type' | 'demotion_mode' | 'demotion_grace_days' | 'auto_sync_enabled' | 'sync_interval_minutes' | 'require_staff_approval' | 'unit_leader_replaces_member'>> & { modules?: GuildConfig['modules'] }, actor: string | null, now: Date = new Date()): Promise<void> {
+export async function updateGuildSettings(db: Db, guildId: string, patch: Partial<Pick<GuildRow, 'country_id' | 'party_id' | 'unit_id' | 'alliance_id' | 'language' | 'community_type' | 'demotion_mode' | 'demotion_grace_days' | 'auto_sync_enabled' | 'sync_interval_minutes' | 'require_staff_approval' | 'unit_leader_replaces_member'>> & { modules?: GuildConfig['modules'] }, actor: string | null, now: Date = new Date(), opts: { confirmRemoveIncompatible?: boolean } = {}): Promise<{ removedMappings: IncompatibleMapping[] }> {
   const allowed = ['country_id', 'party_id', 'unit_id', 'alliance_id', 'language', 'community_type', 'demotion_mode', 'demotion_grace_days', 'auto_sync_enabled', 'sync_interval_minutes', 'require_staff_approval', 'unit_leader_replaces_member', 'modules'] as const; // whitelist: never interpolate caller keys
   const sets: string[] = []; const vals: unknown[] = [guildId];
   for (const k of allowed) if (k in patch) { vals.push(k === 'modules' ? JSON.stringify(patch[k]) : patch[k]); sets.push(`${k}=$${vals.length}${k === 'modules' ? '::jsonb' : ''}`); }
-  if (!sets.length) return;
+  if (!sets.length) return { removedMappings: [] };
+  let removed: IncompatibleMapping[] = [];
+  try {
   await db.tx(async (t) => {
+    // Lock the row first: the type-change check, the mapping removal and the update then see one consistent state.
+    const before = (await t.query<{ community_type: string; country_id: string | null }>('SELECT community_type, country_id FROM guilds WHERE guild_id=$1 FOR UPDATE', [guildId])).rows[0];
+    if (patch.community_type !== undefined && before && patch.community_type !== before.community_type) {
+      const ms = (await t.query<{ id: string; kind: string; discord_role_id: string; game_ref: string }>('SELECT id, kind, discord_role_id, game_ref FROM role_mappings WHERE guild_id=$1 FOR UPDATE', [guildId])).rows
+        .filter((m) => !isBuildKind(m.kind)).map((m) => ({ id: m.id, kind: m.kind, discordRoleId: m.discord_role_id, gameRef: m.game_ref }));
+      const bad = incompatibleMappings(patch.community_type, ms);
+      if (bad.length && !opts.confirmRemoveIncompatible) throw new IncompatibleMappingsError(bad);   // nothing is changed
+      if (bad.length) {
+        await t.query('DELETE FROM role_mappings WHERE guild_id=$1 AND id = ANY($2::uuid[])', [guildId, bad.map((m) => m.id)]);
+        await audit(t, { guildId, actor, action: 'mapping.removed_by_type_change', target: patch.community_type, details: { kinds: bad.map((m) => m.kind), count: bad.length } });
+        removed = bad;
+      }
+    }
     if ('auto_sync_enabled' in patch || 'sync_interval_minutes' in patch) {
       const cur = (await t.query<{ auto_sync_enabled: boolean; sync_interval_minutes: number }>('SELECT auto_sync_enabled, sync_interval_minutes FROM guilds WHERE guild_id=$1 FOR UPDATE', [guildId])).rows[0];
       if (cur) {
@@ -109,7 +154,12 @@ export async function updateGuildSettings(db: Db, guildId: string, patch: Partia
     }
     await t.query(`UPDATE guilds SET ${sets.join(', ')}, updated_at=now() WHERE guild_id=$1`, vals);
     await audit(t, { guildId, actor, action: 'settings.updated', details: { keys: Object.keys(patch) } });
+    const after = (await t.query<{ community_type: string; country_id: string | null }>('SELECT community_type, country_id FROM guilds WHERE guild_id=$1', [guildId])).rows[0];
+    const eff = (r?: { community_type: string; country_id: string | null }) => (r?.community_type === 'country' && r.country_id ? r.country_id : null);
+    if (eff(before) !== eff(after)) await audit(t, { guildId, actor, action: eff(after) ? 'country.reserved' : 'country.released', details: { from: eff(before), to: eff(after) } });
   });
+  } catch (e) { if (isCountryConflict(e)) throw new CountryReservedError(); throw e; }
+  return { removedMappings: removed };
 }
 
 // ---- links used by sync -------------------------------------------------------------------------

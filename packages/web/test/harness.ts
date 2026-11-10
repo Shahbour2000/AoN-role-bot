@@ -53,9 +53,18 @@ export interface Ctx { unlinked: [string, string, string[]][]; app: FastifyInsta
 export class FakeGameWeb {
   player: Fetched<{ id: string; username: string | null }> = { status: 'ok', data: { id: 'usr_p1', username: 'Alpha' } };
   parties: Fetched<never[]> = { status: 'ok', data: [] };
+  /** Phase 3 selectors. `calls` records every upstream request so tests can prove caching. */
+  calls: string[] = [];
+  countriesRes: Fetched<{ id: string; name: string }[]> | undefined = { status: 'ok', data: [{ id: 'pl', name: 'Poland' }, { id: 'eg', name: 'Egypt' }, { id: 'de', name: 'Germany' }, { id: 'ee', name: 'Estonia' }] };
+  unitsList: Fetched<unknown[]> | null = null;
+  searchRes: Fetched<unknown[]> = { status: 'ok', data: [] };
+  names: Record<string, Fetched<string>> = {};
   async playerByName() { return this.player; }
-  async countryParties() { return this.parties as never; }
-  async countryUnits() { return this.parties as never; }
+  async countryParties(id?: string) { this.calls.push(`parties:${id}`); return this.parties as never; }
+  async countryUnits(id?: string) { this.calls.push(`units:${id}`); return (this.unitsList ?? this.parties) as never; }
+  async countryOptions() { this.calls.push('countries'); return this.countriesRes as never; }
+  async searchUnits(q: string, cid?: string) { this.calls.push(`search:${q}:${cid ?? ''}`); return this.searchRes as never; }
+  async entityName(t: string, id: string) { this.calls.push(`name:${t}:${id}`); return this.names[`${t}:${id}`] ?? ({ status: 'incomplete', missing: ['name'] } as never); }
 }
 
 export async function makeApp(over: { cfg?: Partial<WebConfig>; guilds?: string[]; publicDir?: string } = {}): Promise<Ctx> {

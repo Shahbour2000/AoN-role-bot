@@ -32,6 +32,8 @@ export const MAPPING_STATUS = {
   unitsList: 'verified',
   governmentRoster: 'verified',
   countriesList: 'unverified',      // GET /countries shape NOT sampled: tolerant extractor, display names only
+  unitsSearch: 'unverified',        // GET /units?search= : endpoint + params are documented, the response shape is NOT sampled (same extractor as the verified per-country list)
+  entityDetail: 'unverified',       // GET /parties/{id}, /units/{id}: only a top-level string `name` is read, nothing else
   alliance: 'unverified',
   partyMemberList: 'unverified',
   unitMemberList: 'unverified',
@@ -354,4 +356,24 @@ export function extractCountryNames(res: Fetched<unknown>): Fetched<Map<string, 
     if (id && name) out.set(id, name);
   }
   return out.size ? { status: 'ok', data: out } : { status: 'incomplete', missing: ['countries (no id/name pairs)'] };
+}
+
+/** A selectable game entity. `name` is a real game string; there is NO image/flag field here because none has been verified in any sample. */
+export interface EntityOption { id: string; name: string }
+
+/** Countries as options, A–Z. Same tolerant extractor as the display-name lookup (shape unverified). */
+export function extractCountryOptions(res: Fetched<unknown>): Fetched<EntityOption[]> {
+  const names = extractCountryNames(res);
+  if (names.status !== 'ok') return names as Fetched<never>;
+  return { status: 'ok', data: [...names.data].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)) };
+}
+/** Parties / units of the VERIFIED list shapes as options. Entries without a name are skipped (they cannot be shown meaningfully). */
+export const partyOptions = (list: readonly PartySummary[]): EntityOption[] => list.filter((p) => p.name).map((p) => ({ id: p.id, name: p.name as string }));
+export const unitOptions = (list: readonly UnitSummary[]): EntityOption[] => list.filter((u) => u.name).map((u) => ({ id: u.id, name: u.name as string }));
+
+/** Display name from a single-entity response (`GET /parties/{id}`, `/units/{id}`). UNVERIFIED shape: only a top-level string `name` counts. */
+export function extractEntityName(res: Fetched<unknown>): Fetched<string> {
+  if (res.status !== 'ok') return res as Fetched<never>;
+  const n = isObj(res.data) && typeof res.data['name'] === 'string' ? res.data['name'].trim() : '';
+  return n ? { status: 'ok', data: n } : { status: 'incomplete', missing: ['name'] };
 }

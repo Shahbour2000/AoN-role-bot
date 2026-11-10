@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
-import { getGuildConfig, getLadder, claimLink, listLinks, saveLadder } from '@aon/db';
+import { getGuildConfig, getLadder, claimLink, listLinks, saveLadder, updateGuildSettings } from '@aon/db';
 import { ADMIN, BASE, guildInfo, login, makeApp, role, type Ctx, type Login } from './harness.js';
 
 const PUB = join(__dirname, '..', 'public');
@@ -30,7 +30,7 @@ async function openApp(c: Ctx, l: Login, hash = '#/', override?: (url: string, m
     calls.push({ method, url: String(url), status: res.statusCode, ...(opts.body ? { body: opts.body } : {}) });
     return { ok: res.statusCode < 400, status: res.statusCode, json: async () => JSON.parse(res.body) };
   };
-  for (const f of ['i18n.js', 'common.js', 'app.js']) win.eval(read(f));          // the REAL shipped scripts
+  for (const f of ['i18n.js', 'common.js', 'picker.js', 'app.js']) win.eval(read(f));          // the REAL shipped scripts
   // jsdom fires DOMContentLoaded itself while the document is still 'loading'; only fire manually if it already did.
   if (win.document.readyState !== 'loading') win.document.dispatchEvent(new win.Event('DOMContentLoaded'));
   const $ = (s: string) => win.document.querySelector(s); const $$ = (s: string) => [...win.document.querySelectorAll(s)];
@@ -151,7 +151,7 @@ describe('dashboard UI against the real backend (jsdom)', () => {
     p.win.location.hash = `#/g/${G1}/players`;
     await waitFor(() => p.$$('tbody tr').some((r) => r.textContent!.includes('<script>')), 'player row');
     expect(p.$$('script').filter((x) => !x.hasAttribute('src'))).toHaveLength(0);   // no inline script was ever created
-    expect(p.$$('script[src]')).toHaveLength(3);                                  // only the page's own three files
+    expect(p.$$('script[src]')).toHaveLength(4);                                  // only the page's own four files (i18n, common, picker, app)
   });
   it('mappings: add through the form, appears in the table; delete removes it', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/roles`);
@@ -187,24 +187,26 @@ describe('dashboard UI against the real backend (jsdom)', () => {
 });
 
 describe('server setup page', () => {
-  it('choosing a community type pre-selects its modules (editable); alliance is not offered anywhere in setup', async () => {
+  it('choosing a community type shows ONLY the modules it offers (pre-selected, editable); alliance is not offered anywhere in setup', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/setup`);
     await waitFor(() => p.$('#mod-government'), 'form');
-    const box = (id: string) => p.$(id) as HTMLInputElement; const type = p.$$('.card select')[1] as HTMLSelectElement;
+    const box = (id: string) => p.$(id) as HTMLInputElement | null; const type = p.$$('.card select')[1] as HTMLSelectElement;
+    expect([...type.options].map((o) => o.value)).toEqual(['general', 'country', 'party', 'military_unit']);   // no alliance option
     type.value = 'party'; type.dispatchEvent(new p.win.Event('change', { bubbles: true }));
-    expect([box('#mod-government').checked, box('#mod-party').checked, box('#mod-unit').checked]).toEqual([false, true, false]);
+    expect(box('#mod-government')).toBeNull(); expect(box('#mod-unit')).toBeNull(); expect(box('#mod-party')!.checked).toBe(true); expect(box('#mod-ranks')).not.toBeNull();
     expect(p.$('#preset-note')!.hasAttribute('hidden')).toBe(false);
     type.value = 'military_unit'; type.dispatchEvent(new p.win.Event('change', { bubbles: true }));
-    expect([box('#mod-government').checked, box('#mod-party').checked, box('#mod-unit').checked]).toEqual([false, false, true]);
-    expect(p.$('#mod-alliance')).toBeNull(); expect(p.$('#alliance-note')).toBeNull();
-    expect([...type.options].map((o) => o.value)).toEqual(['general', 'country', 'party', 'military_unit']);   // no alliance option
-    expect(p.$('.card')!.textContent).not.toContain('تحالف');
+    expect(box('#mod-party')).toBeNull(); expect(box('#mod-unit')!.checked).toBe(true);
+    type.value = 'country'; type.dispatchEvent(new p.win.Event('change', { bubbles: true }));
+    expect(['#mod-government', '#mod-party', '#mod-unit', '#mod-ranks'].every((id) => box(id))).toBe(true); expect(box('#mod-government')!.checked).toBe(true); expect(box('#mod-unit')!.checked).toBe(false);
+    expect(p.$('#mod-alliance')).toBeNull(); expect(p.$('#alliance-note')).toBeNull(); expect(p.$('.card')!.textContent).not.toContain('تحالف');
   });
   it('a legacy guild that already stores the alliance type sees only a disabled, localized "Closed" option (no "coming soon")', async () => {
     const { c, l } = await setup();
     await c.db.query(`UPDATE guilds SET community_type='alliance' WHERE guild_id=$1`, [G1]);
-    const p = await openApp(c, l, `#/g/${G1}/setup`); await waitFor(() => p.$('#mod-government'), 'form');
+    const p = await openApp(c, l, `#/g/${G1}/setup`); await waitFor(() => p.$('#type-desc')?.textContent, 'form');
     const type = p.$$('.card select')[1] as HTMLSelectElement; const o = [...type.options].find((x) => x.value === 'alliance')!;
+    expect(p.$('#type-desc')!.textContent).toContain('التحالف'); expect(p.$('#mod-government')).toBeNull(); expect(p.$('.picker')).toBeNull();        // legacy data is kept, nothing new is offered
     expect(o.disabled).toBe(true); expect(o.textContent).toContain('مغلق'); expect(o.textContent).not.toMatch(/قريب|بعد/);
   });
   it('saves link mode, the unit-leader option and modules; the military system stays an independent switch', async () => {
@@ -213,7 +215,7 @@ describe('server setup page', () => {
     expect((p.$('#mod-ranks') as HTMLInputElement).checked).toBe(false);                       // optional: off by default
     const selects = p.$$('.card select') as HTMLSelectElement[]; const linkMode = selects[selects.length - 1]!;
     expect([...linkMode.options].map((o) => o.value)).toEqual(['direct', 'staff_approval']); expect(linkMode.value).toBe('direct');
-    expect(p.$('.card')!.textContent).toContain('لا يثبت أن العضو يملك حساب اللعبة');          // the limitation is stated in the UI
+    expect(p.$('#advanced')!.textContent).toContain('لا يثبت أن العضو يملك حساب اللعبة');          // the limitation is stated in the UI (under Advanced options)
     linkMode.value = 'staff_approval'; (p.$('#unit-leader-replaces') as HTMLInputElement).checked = true; (p.$('#mod-unit') as HTMLInputElement).checked = true;
     click(p, [...p.$$('button')].find((b) => b.textContent === 'حفظ')!);
     await waitFor(() => p.$('.toast:not(.bad)'), 'saved');
@@ -421,5 +423,278 @@ describe('player build roles page', () => {
     const { c, l } = await setup(); await c.app.inject({ method: 'POST', url: `/api/guilds/${G1}/mappings`, headers: { ...l.headers, cookie: `aon_session=${l.cookies['aon_session']}`, 'content-type': 'application/json' }, payload: JSON.stringify({ kind: 'president', discordRoleId: '900002' }) });
     const p = await openApp(c, l, `#/g/${G1}/builds`); await waitFor(() => p.$('#build-war'), 'form');
     expect((([...sel(p, 'war').options].find((o) => o.value === '900002')) as HTMLOptionElement).disabled).toBe(true);
+  });
+});
+
+// ====================================================================== Phase 2: design system, landing page, app shell
+describe('app shell (sidebar, server switcher, mobile drawer, page header)', () => {
+  it('renders grouped sidebar navigation with icons, marks the current page, and shows the page title + short description', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`);
+    await waitFor(() => p.$('#build-war'), 'builds page');
+    const groups = p.$$('#nav .nav-group h4').map((h) => h.textContent); expect(groups).toEqual(['عام', 'الرتب', 'المجتمع', 'التشغيل']);
+    const links = p.$$('#nav a'); expect(links.length).toBe(9); expect(links.every((a) => a.querySelector('svg.icon'))).toBe(true);
+    const cur = p.$$('#nav a[aria-current="page"]'); expect(cur.length).toBe(1); expect((cur[0] as HTMLAnchorElement).getAttribute('href')).toBe(`#/g/${G1}/builds`);
+    expect(p.$('.page-head h2')!.textContent).toBe('أدوار البناء'); expect(p.$('.page-head p')!.textContent!.length).toBeGreaterThan(5);
+  });
+  it('server switcher shows the current server and offers the other installed servers plus "all servers"', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/overview`);
+    await waitFor(() => p.$('#switcher .name'), 'switcher'); expect(p.$('#switcher .name')!.textContent).toBe(`Guild ${G1}`);
+    const menu = p.$('#switcher .menu') as HTMLElement; expect(menu.hidden).toBe(true);
+    click(p, p.$('#switcher > button')); expect(menu.hidden).toBe(false); expect(p.$('#switcher > button')!.getAttribute('aria-expanded')).toBe('true');
+    const hrefs = [...menu.querySelectorAll('a')].map((a) => a.getAttribute('href')); expect(hrefs).toEqual([`#/g/${G2}/overview`, '#/']);   // current guild and the not-installed one are not listed
+    p.doc.dispatchEvent(new p.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); expect(menu.hidden).toBe(true);
+  });
+  it('mobile drawer: the menu button opens/closes the sidebar and scrim, Escape closes, and navigating closes it', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/overview`); await waitFor(() => p.$('#nav a'), 'nav');
+    const side = p.$('#sidebar')!; const btn = p.$('#menu-toggle')!;
+    expect(side.classList.contains('open')).toBe(false); click(p, btn);
+    expect(side.classList.contains('open')).toBe(true); expect(p.$('#scrim')!.classList.contains('show')).toBe(true); expect(btn.getAttribute('aria-expanded')).toBe('true');
+    p.doc.dispatchEvent(new p.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); expect(side.classList.contains('open')).toBe(false); expect(btn.getAttribute('aria-expanded')).toBe('false');
+    click(p, btn); p.win.location.hash = `#/g/${G1}/sync`; await waitFor(() => !side.classList.contains('open'), 'closed on navigation');
+  });
+  it('the guild list keeps a minimal sidebar (all servers) and hides the server switcher', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l); await waitFor(() => p.$$('.card').length >= 3, 'cards');
+    expect((p.$('#switcher') as HTMLElement).hidden).toBe(true); expect(p.$$('#nav a').length).toBe(1);
+  });
+});
+
+describe('language switching keeps the page state', () => {
+  it('unsaved form values (including a changed server type that rebuilds the form), the selected server and tab survive an Arabic→English→Arabic switch without any save', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/setup`);
+    await waitFor(() => p.$('#mod-government'), 'form');
+    const typeSel = () => p.$$('#tab-content .card select')[1] as HTMLSelectElement; const search = () => p.$('#tab-content .picker-input') as HTMLInputElement;
+    typeSel().value = 'party'; typeSel().dispatchEvent(new p.win.Event('change', { bubbles: true }));          // rebuilds the area: party picker + party/ranks modules only
+    (p.$('#mod-ranks') as HTMLInputElement).checked = true; type(p, search(), 'unsaved-search');
+    const writesBefore = p.calls.filter((x) => x.method !== 'GET').length;
+    click(p, p.$('#lang-toggle')); await waitFor(() => p.doc.documentElement.dir === 'ltr', 'ltr');
+    await waitFor(() => (p.$('#tab-content .picker-input') as HTMLInputElement | null)?.value === 'unsaved-search', 'restored');
+    expect(typeSel().value).toBe('party'); expect((p.$('#mod-ranks') as HTMLInputElement).checked).toBe(true); expect((p.$('#mod-party') as HTMLInputElement).checked).toBe(true); expect(p.$('#mod-government')).toBeNull();
+    expect(p.win.location.hash).toBe(`#/g/${G1}/setup`); expect(p.$('#nav a[aria-current="page"]')!.getAttribute('href')).toBe(`#/g/${G1}/setup`);
+    expect(p.$('#nav a[aria-current="page"] span')!.textContent).toBe('Server setup'); expect(p.$('#type-desc')!.textContent).toMatch(/^Party:/);        // texts follow the new language
+    click(p, p.$('#lang-toggle')); await waitFor(() => p.doc.documentElement.dir === 'rtl', 'rtl'); await waitFor(() => search()?.value === 'unsaved-search', 'restored again');
+    expect(typeSel().value).toBe('party'); expect(p.calls.filter((x) => x.method !== 'GET').length).toBe(writesBefore);       // switching language never saves anything
+  });
+  it('a saved (auto-applied) value is not re-fired on restore, and switching on another tab does not leak state', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`); await waitFor(() => p.$('#build-war'), 'form');
+    const war = p.$('#build-war') as HTMLSelectElement; war.value = '900001'; war.dispatchEvent(new p.win.Event('change', { bubbles: true }));
+    click(p, p.$('#lang-toggle')); await waitFor(() => p.doc.documentElement.dir === 'ltr', 'ltr');
+    await waitFor(() => (p.$('#build-war') as HTMLSelectElement | null)?.value === '900001', 'war role kept');
+    p.win.location.hash = `#/g/${G1}/setup`; await waitFor(() => p.$('#mod-government'), 'setup');
+    expect((p.$$('#tab-content input.wide')[0] as HTMLInputElement).value).toBe('');      // nothing from the builds page leaked into setup
+  });
+});
+
+describe('landing page', () => {
+  async function openLanding(over: Record<string, unknown> = {}, signedIn = false) {
+    const dom = new JSDOM(read('landing.html'), { url: `${BASE}/${over['query'] ?? ''}`, runScripts: 'outside-only', pretendToBeVisual: true });
+    const win = dom.window as unknown as Window & typeof globalThis;
+    (win as unknown as { fetch: unknown }).fetch = async (url: string) => (String(url).startsWith('/api/public') ? { ok: true, status: 200, json: async () => ({ inviteUrl: 'https://discord.com/oauth2/authorize?client_id=1&permissions=268435456' }) } : { ok: signedIn, status: signedIn ? 200 : 401, json: async () => ({}) });
+    for (const f of ['i18n.js', 'common.js', 'landing.js']) win.eval(read(f));
+    if (win.document.readyState !== 'loading') win.document.dispatchEvent(new win.Event('DOMContentLoaded'));
+    await waitFor(() => (win.document.getElementById('add-bot') as HTMLAnchorElement).href.startsWith('https://discord.com/'), 'invite url');
+    return win;
+  }
+  it('has the two primary actions (open dashboard, add to Discord) and the invite link is applied to both add-bot buttons', async () => {
+    const w = await openLanding(); const d = w.document;
+    expect(d.getElementById('open-dashboard')!.getAttribute('href')).toBe('/app'); expect((d.getElementById('add-bot') as HTMLAnchorElement).href).toContain('permissions=268435456');
+    expect((d.getElementById('add-bot-2') as HTMLAnchorElement).href).toContain('permissions=268435456');
+    expect(d.querySelectorAll('.feature svg.icon').length).toBeGreaterThanOrEqual(9);          // icons are painted
+    expect(d.querySelector('h1')!.textContent!.length).toBeGreaterThan(10);
+  });
+  it('switches to English LTR and back; all visible strings come from the dictionary (no untranslated keys left on the page)', async () => {
+    const w = await openLanding(); const d = w.document;
+    expect(d.documentElement.dir).toBe('rtl'); (d.getElementById('lang-toggle') as HTMLElement).click();
+    expect(d.documentElement.dir).toBe('ltr'); expect(d.querySelector('h1')!.textContent).toBe('Link player accounts to Discord and let roles manage themselves');
+    const text = d.body.textContent!; for (const k of [...d.querySelectorAll('[data-i18n]')].map((n) => n.getAttribute('data-i18n')!)) expect(text, k).not.toContain(`${k} `);
+    expect([...d.querySelectorAll('[data-i18n]')].every((n) => n.textContent !== n.getAttribute('data-i18n'))).toBe(true);
+    (d.getElementById('lang-toggle') as HTMLElement).click(); expect(d.documentElement.dir).toBe('rtl');
+  });
+  it('signed-in visitors get "dashboard" on the header button; a failed login shows the localized error', async () => {
+    const w = await openLanding({ query: '?error=login_failed' }, true); const d = w.document;
+    await waitFor(() => d.getElementById('login-btn')!.getAttribute('href') === '/app', 'signed in'); expect(d.getElementById('login-error')!.hidden).toBe(false);
+  });
+  it('does not advertise unbuilt features or alliances', () => {
+    const all = read('landing.html') + read('i18n.js').match(/(?:f\d_[td]|lt_\w+|faq\d_\w|safe_\d|feat_\w+|hero_\w+|chip_\d|cta_\w+): '[^']*'/g)!.join(' ');
+    expect(all).not.toMatch(/alliance|تحالف|ticket|تذكر|proxy|بروكسي|nickname|لقب/i);
+  });
+});
+
+describe('mandatory developer credit', () => {
+  it('is the exact English text "Developed by AbuDujana" in both pages (static HTML, so it survives without JS) and in both dictionaries', () => {
+    for (const f of ['app.html', 'landing.html']) expect(read(f), f).toContain('Developed by AbuDujana');
+    const w = { I18N: undefined as unknown } as { I18N: Record<'ar' | 'en', Record<string, string>> }; new Function('window', read('i18n.js'))(w);
+    expect(w.I18N.ar['credit']).toBe('Developed by AbuDujana'); expect(w.I18N.en['credit']).toBe('Developed by AbuDujana');
+  });
+  it('stays visible and English after a language switch in the dashboard', async () => {
+    const { c, l } = await setup(); const p = await openApp(c, l); await waitFor(() => p.$$('.card').length >= 3, 'cards');
+    click(p, p.$('#lang-toggle')); await waitFor(() => p.doc.documentElement.dir === 'ltr', 'ltr');
+    const credits = p.$$('.credit').map((n) => n.textContent); expect(credits.length).toBeGreaterThanOrEqual(2); expect(new Set(credits)).toEqual(new Set(['Developed by AbuDujana']));
+  });
+});
+
+describe('design system (static checks; layout itself needs a real browser)', () => {
+  it('defines the responsive breakpoints, a mobile drawer, overflow-safe tables, RTL-aware drawer direction and reduced-motion handling', () => {
+    const css = read('app.css');
+    expect(css).toContain('@media (max-width: 1023px)'); expect(css).toContain('@media (max-width: 640px)'); expect(css).toContain('prefers-reduced-motion');
+    expect(css).toMatch(/\.scroll\s*\{[^}]*overflow-x:\s*auto/); expect(css).toMatch(/:root\[dir="rtl"\]\s*\.sidebar\s*\{[^}]*translateX\(105%\)/);
+    expect(css).toMatch(/\.grid\s*>\s*\*\s*\{\s*min-inline-size:\s*0/); expect(css).toMatch(/\.row\s*>\s*\*\s*\{\s*min-inline-size:\s*0/);
+    expect(css).not.toMatch(/font-size:\s*(?:[0-9.]+)(?:px|rem)[^;]*;[^}]*@media/);   // no "shrink the font to fix layout" overrides inside breakpoints
+  });
+  it('uses no remote assets and ships a single dark theme (no leftover theme toggle)', () => {
+    for (const f of ['app.html', 'landing.html']) expect(read(f), f).not.toContain('theme-toggle');
+    expect(read('app.css')).not.toMatch(/https?:\/\//);
+  });
+});
+
+const key = (p: Page, el: Element, k: string) => el.dispatchEvent(new p.win.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+// ====================================================================== Phase 3: type-driven setup, searchable selectors, country reservation
+import { addRoleMapping, listRoleMappings } from '@aon/db';
+
+describe('searchable entity selectors (setup page)', () => {
+  const game = (c: Ctx) => c.game as unknown as { countriesRes: unknown; parties: unknown; calls: string[]; unitsList: unknown; searchRes: unknown };
+  const openSetup = async (c: Ctx, l: Login, g = G1) => { const p = await openApp(c, l, `#/g/${g}/setup`); await waitFor(() => p.$('#type-desc')?.textContent, 'setup form'); return p; };
+  const setType = (p: Page, v: string) => { const sel = p.$$('#tab-content .card select')[1] as HTMLSelectElement; sel.value = v; sel.dispatchEvent(new p.win.Event('change', { bubbles: true })); };
+  const optionTexts = (p: Page) => p.$$('.picker-list [role="option"]').map((o) => o.textContent);
+  const save = (p: Page) => click(p, p.$('#save-settings')!);
+
+  it('country: opens with real names (no raw ids), supports typing, arrow keys + Enter, and the chosen country is saved and reserved', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); const p = await openSetup(c, l);
+    const input = p.$('.picker-input') as HTMLInputElement; expect(input.getAttribute('role')).toBe('combobox'); expect(input.getAttribute('aria-expanded')).toBe('false');
+    input.dispatchEvent(new p.win.Event('focus')); await waitFor(() => optionTexts(p).length === 4, 'first page');
+    expect(optionTexts(p).map((x) => x!.replace(/^..?(?=[A-Z])/, ''))).toEqual(expect.arrayContaining(['Egypt', 'Poland'])); expect(p.$('.picker-list')!.textContent).not.toMatch(/\b(eg|pl|de|ee)\b/);   // names only
+    expect(input.getAttribute('aria-expanded')).toBe('true'); expect(p.$('.picker-status')!.textContent).toContain('4');
+    type(p, input, 'ger'); await waitFor(() => optionTexts(p).length === 1, 'filtered');
+    key(p, input, 'ArrowDown'); expect(input.getAttribute('aria-activedescendant')).toBe(p.$('.picker-list [role="option"]')!.id); key(p, input, 'Enter');
+    await waitFor(() => p.$('.picker-selected'), 'chosen'); expect(p.$('.picker-selected')!.textContent).toContain('Germany'); expect((p.$('.picker-value') as HTMLInputElement).value).toBe('de');
+    save(p); await waitFor(() => p.$('.toast:not(.bad)'), 'saved'); expect((await getGuildConfig(c.db, G1))!.countryId).toBe('de');
+    await waitFor(() => p.$('#release-country'), 'reservation controls'); expect(p.$('.badge.ok')).not.toBeNull();
+  });
+  it('keyboard: ArrowUp wraps, Home/End jump, Escape closes the list without clearing the selection', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); const p = await openSetup(c, l);
+    const input = p.$('.picker-input') as HTMLInputElement; input.dispatchEvent(new p.win.Event('focus')); await waitFor(() => optionTexts(p).length === 4, 'list');
+    key(p, input, 'ArrowUp'); expect(p.$$('.picker-list [role="option"]')[3]!.classList.contains('active')).toBe(true);
+    key(p, input, 'Home'); expect(p.$$('.picker-list [role="option"]')[0]!.classList.contains('active')).toBe(true); key(p, input, 'End'); expect(p.$$('.picker-list [role="option"]')[3]!.classList.contains('active')).toBe(true);
+    key(p, input, 'Escape'); expect((p.$('.picker-list') as HTMLElement).hidden).toBe(true); expect(input.getAttribute('aria-expanded')).toBe('false');
+  });
+  it('shows the currently saved selection by NAME (resolved from the game) and keeps it through a reload', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country', country_id: 'eg' }, 'u'); const p = await openSetup(c, l);
+    await waitFor(() => p.$('.picker-selected')?.textContent?.includes('Egypt'), 'name resolved'); expect(p.$('.picker-selected')!.textContent).not.toContain('eg');
+    expect(p.$('.picker-selected button')).toBeNull();                                  // a reserved country cannot be cleared here: it is released through "Unlink country"
+  });
+  it('pagination: pages of 20 with "show more", result count, and an empty state for no match', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u');
+    game(c).countriesRes = { status: 'ok', data: Array.from({ length: 45 }, (_, i) => ({ id: `c${i}`, name: `Land ${String(i).padStart(2, '0')}` })) };
+    const p = await openSetup(c, l); const input = p.$('.picker-input') as HTMLInputElement; input.dispatchEvent(new p.win.Event('focus'));
+    await waitFor(() => optionTexts(p).length === 20, 'page 1'); expect(p.$('.picker-status')!.textContent).toContain('45');
+    const more = p.$$('.picker-actions button').find((b) => b.textContent === 'عرض المزيد') as HTMLButtonElement; expect(more.hidden).toBe(false); click(p, more);
+    await waitFor(() => optionTexts(p).length === 40, 'page 2'); click(p, more); await waitFor(() => optionTexts(p).length === 45, 'page 3'); expect(more.hidden).toBe(true);
+    type(p, input, 'zzzz'); await waitFor(() => p.$('.picker-status')!.textContent === 'لا نتائج.', 'empty');
+  });
+  it('a failed first load shows a retryable error (failures are not cached), and recovers when the game answers', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); const g = game(c); g.countriesRes = { status: 'error', message: 'x' };
+    const p = await openSetup(c, l); const input = p.$('.picker-input') as HTMLInputElement; input.dispatchEvent(new p.win.Event('focus'));
+    await waitFor(() => p.$('.picker-status')!.textContent === 'تعذّر تحميل القائمة.', 'error'); const retry = p.$$('.picker-actions button').find((b) => b.textContent === 'إعادة المحاولة') as HTMLButtonElement; expect(retry.hidden).toBe(false);
+    g.countriesRes = { status: 'ok', data: [{ id: 'a', name: 'Land A' }] }; click(p, retry); await waitFor(() => optionTexts(p).length === 1, 'recovered'); expect(retry.hidden).toBe(true);
+  });
+  it('a rate-limited game says so in plain words instead of showing an empty list', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); game(c).countriesRes = { status: 'rate_limited', retryAfterMs: 1 };
+    const p = await openSetup(c, l); (p.$('.picker-input') as HTMLInputElement).dispatchEvent(new p.win.Event('focus')); await waitFor(() => p.$('.picker-status')!.textContent!.includes('طلبات كثيرة'), 'rate limited');
+    expect(optionTexts(p)).toHaveLength(0);
+  });
+  it('an unrecognised game response opens the manual-ID fallback (nothing is guessed); a valid manual id is accepted, an invalid one refused', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); game(c).countriesRes = { status: 'incomplete', missing: ['countries'] };
+    const p = await openSetup(c, l); (p.$('.picker-input') as HTMLInputElement).dispatchEvent(new p.win.Event('focus'));
+    await waitFor(() => p.$('.picker-status')!.textContent!.includes('يدوياً'), 'unrecognised'); expect((p.$('.picker-manual') as HTMLDetailsElement).open).toBe(true);
+    const manual = p.$('.picker-manual input.wide') as HTMLInputElement; const apply = p.$('.picker-manual button') as HTMLButtonElement;
+    type(p, manual, '../x'); click(p, apply); expect((p.$('.picker-manual .err') as HTMLElement).hidden).toBe(false); expect(p.$('.picker-selected')!.hasAttribute('hidden')).toBe(true);
+    type(p, manual, 'zz9'); click(p, apply); await waitFor(() => !p.$('.picker-selected')!.hasAttribute('hidden'), 'applied'); expect(p.$('.picker-selected')!.textContent).toContain('العنصر المحدَّد');
+    save(p); await waitFor(() => p.$('.toast:not(.bad)'), 'saved'); expect((await getGuildConfig(c.db, G1))!.countryId).toBe('zz9');
+  });
+  it('party servers: a country filter (not saved) is needed first, then real parties are searchable; the chosen party is saved', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'party' }, 'u');
+    game(c).parties = { status: 'ok', data: [{ id: 'pty_1', name: 'Ummah Caliphate Party', leaderId: null, leaderName: null, members: 3, ruling: true }, { id: 'pty_2', name: 'National Party', leaderId: null, leaderName: null, members: 2, ruling: false }] };
+    const p = await openSetup(c, l); const [scope, partyIn] = p.$$('.picker-input') as HTMLInputElement[];
+    partyIn!.dispatchEvent(new p.win.Event('focus')); await waitFor(() => p.$$('.picker-status')[1]!.textContent === 'اختر الدولة أولاً.', 'needs country');
+    scope!.dispatchEvent(new p.win.Event('focus')); await waitFor(() => optionTexts(p).length === 4, 'countries'); key(p, scope!, 'ArrowDown'); key(p, scope!, 'Enter'); await waitFor(() => p.$$('.picker-selected').some((x) => !x.hasAttribute('hidden')), 'scope chosen');
+    partyIn!.dispatchEvent(new p.win.Event('blur')); partyIn!.dispatchEvent(new p.win.Event('focus')); await waitFor(() => p.$$('.picker-list [role="option"]').some((o) => o.textContent!.includes('Ummah')), 'parties');
+    const opt = p.$$('.picker-list [role="option"]').find((o) => o.textContent!.includes('Ummah'))!; opt.dispatchEvent(new p.win.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    save(p); await waitFor(() => p.$('.toast:not(.bad)'), 'saved'); const cfg = await getGuildConfig(c.db, G1); expect(cfg!.partyId).toBe('pty_1'); expect(cfg!.countryId).toBeNull();     // the scope filter was NOT saved
+    expect(game(c).calls).toContain('parties:eg');                                       // the (unsaved) country filter scoped the party lookup
+  });
+  it('unit servers: the game search needs 2+ characters, shows the unverified-source note, and saves the chosen unit', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'military_unit' }, 'u');
+    game(c).searchRes = { status: 'ok', data: [{ id: 'mu_9', name: 'Black Eagles', countryId: 'pl', ownerId: null, ownerName: null, members: 1, capacity: 10, joinPolicy: null }] };
+    const p = await openSetup(c, l); const unitIn = p.$$('.picker-input')[1] as HTMLInputElement; unitIn.dispatchEvent(new p.win.Event('focus'));
+    await waitFor(() => p.$$('.picker-status')[1]!.textContent!.includes('حرفين'), 'needs query'); type(p, unitIn, 'bl');
+    await waitFor(() => p.$$('.picker-list [role="option"]').some((o) => o.textContent!.includes('Black Eagles')), 'result'); expect(p.$$('.picker-status')[1]!.textContent).toContain('لم يُتحقَّق');
+    key(p, unitIn, 'ArrowDown'); key(p, unitIn, 'Enter'); save(p); await waitFor(() => p.$('.toast:not(.bad)'), 'saved'); expect((await getGuildConfig(c.db, G1))!.unitId).toBe('mu_9');
+  });
+  it('is accessible: label wired to the input, listbox and status live region, no raw ids visible', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u'); const p = await openSetup(c, l);
+    const input = p.$('.picker-input') as HTMLInputElement; expect(p.$(`label[for="${input.id}"]`)).not.toBeNull(); expect(input.getAttribute('aria-controls')).toBe(p.$('.picker-list')!.id);
+    expect(p.$('.picker-status')!.getAttribute('aria-live')).toBe('polite'); expect(p.$('.picker-list')!.getAttribute('role')).toBe('listbox');
+    expect(p.$('.picker-status')!.textContent).toBe('');                                  // nothing searched yet: no misleading "no results"
+    expect(p.$('.picker-label, .picker label')!.textContent).toBe('الدولة');                // named, not "ID"
+  });
+});
+
+describe('server type change and country reservation (setup page)', () => {
+  const openSetup = async (c: Ctx, l: Login, g = G1) => { const p = await openApp(c, l, `#/g/${g}/setup`); await waitFor(() => p.$('#type-desc')?.textContent, 'setup form'); return p; };
+  const setType = (p: Page, v: string) => { const sel = p.$$('#tab-content .card select')[1] as HTMLSelectElement; sel.value = v; sel.dispatchEvent(new p.win.Event('change', { bubbles: true })); };
+  const btn = (p: Page, text: string) => p.$$('button').find((b) => b.textContent === text) as HTMLButtonElement | undefined;
+
+  it('a type change that would orphan mappings shows exactly what will be removed, needs an explicit tick, and Cancel/Escape change nothing', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country', country_id: 'eg' }, 'u');
+    for (const [i, k] of (['president', 'citizen', 'party_member'] as const).entries()) await addRoleMapping(c.db, { guildId: G1, kind: k, discordRoleId: `90000${i + 1}`, actor: 'u' });
+    const p = await openSetup(c, l); setType(p, 'party'); click(p, p.$('#save-settings')!);
+    await waitFor(() => p.$('.dialog.wide'), 'confirmation dialog'); const items = p.$$('.dialog.wide li').map((x) => x.textContent); expect(items).toHaveLength(2);
+    expect(items.join(' ')).toContain('رئيس'); expect(items.join(' ')).toContain('مواطن'); expect(items.join(' ')).not.toContain('عضو'); expect(p.$('.dialog.wide')!.textContent).toContain('لن تُحذف أي رتب في ديسكورد');
+    const go = [...p.$$('.dialog.wide button')].find((b) => b.className.includes('danger')) as HTMLButtonElement; expect(go.disabled).toBe(true);
+    key(p, p.$('#removal-ack')!, 'Escape'); await waitFor(() => !p.$('.dialog.wide'), 'closed');
+    expect((await getGuildConfig(c.db, G1))!.communityType).toBe('country'); expect(await listRoleMappings(c.db, G1)).toHaveLength(3);        // nothing happened
+    click(p, p.$('#save-settings')!); await waitFor(() => p.$('.dialog.wide'), 'dialog again'); const cancel = [...p.$$('.dialog.wide button')].find((b) => b.textContent === 'إلغاء')!; click(p, cancel);
+    await waitFor(() => !p.$('.dialog.wide'), 'cancelled'); expect(await listRoleMappings(c.db, G1)).toHaveLength(3);
+  });
+  it('after the explicit confirmation the type changes, only the incompatible mappings go, the user is told, and the page shows the new type', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country', country_id: 'eg' }, 'u');
+    for (const [i, k] of (['president', 'party_member'] as const).entries()) await addRoleMapping(c.db, { guildId: G1, kind: k, discordRoleId: `90000${i + 1}`, actor: 'u' });
+    const p = await openSetup(c, l); setType(p, 'party'); click(p, p.$('#save-settings')!); await waitFor(() => p.$('.dialog.wide'), 'dialog');
+    const ack = p.$('#removal-ack') as HTMLInputElement; ack.checked = true; ack.dispatchEvent(new p.win.Event('change', { bubbles: true }));
+    const go = [...p.$$('.dialog.wide button')].find((b) => b.className.includes('danger')) as HTMLButtonElement; expect(go.disabled).toBe(false); click(p, go);
+    await waitFor(() => !p.$('.dialog.wide') && p.$('.toast'), 'saved'); const cfg = await getGuildConfig(c.db, G1); expect(cfg!.communityType).toBe('party'); expect((await listRoleMappings(c.db, G1)).map((m) => m.kind)).toEqual(['party_member']);
+    expect(p.$$('.toast').map((x) => x.textContent).join(' ')).toContain('1');
+  });
+  it('a type change with nothing to remove saves directly, and modules the new type lacks are reported', async () => {
+    const { c, l } = await setup(); const p = await openSetup(c, l); (p.$('#mod-government') as HTMLInputElement).checked = true; setType(p, 'party'); click(p, p.$('#save-settings')!);
+    await waitFor(() => p.$('.toast:not(.bad)'), 'saved'); expect(p.$('.dialog')).toBeNull(); expect((await getGuildConfig(c.db, G1))!.communityType).toBe('party');
+  });
+  it('role mapping form only offers the kinds the server type allows', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'party' }, 'u'); const p = await openApp(c, l, `#/g/${G1}/roles`); await waitFor(() => p.$('#map-kind'), 'form');
+    expect([...(p.$('#map-kind') as HTMLSelectElement).options].map((o) => o.value).sort()).toEqual(['party_leader', 'party_member', 'party_role']); expect(p.$$('#map-kind optgroup')).toHaveLength(1);
+  });
+  it('a country already linked to another server gives a clear, persistent message with the support contact; nothing is saved and the other server is not named', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G2, { community_type: 'country', country_id: 'eg' }, 'u'); await updateGuildSettings(c.db, G1, { community_type: 'country' }, 'u');
+    const p = await openSetup(c, l); const input = p.$('.picker-input') as HTMLInputElement; input.dispatchEvent(new p.win.Event('focus')); await waitFor(() => p.$$('.picker-list [role="option"]').length === 4, 'list');
+    const egypt = p.$$('.picker-list [role="option"]').find((o) => o.textContent!.includes('Egypt'))!; egypt.dispatchEvent(new p.win.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    click(p, p.$('#save-settings')!); await waitFor(() => !(p.$('#country-conflict') as HTMLElement).hidden, 'conflict');
+    const msg = p.$('#country-conflict')!.textContent!; expect(msg).toContain('abudujana15'); expect(msg).not.toContain(G2); expect((await getGuildConfig(c.db, G1))!.countryId).toBeNull(); expect(p.$('.toast:not(.bad)')).toBeNull();
+  });
+  it('the reservation is explained as a claim, not proof of in-game authority; Unlink needs confirmation, then frees the country', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country', country_id: 'eg' }, 'u'); const p = await openSetup(c, l);
+    expect(p.$('#type-area')!.textContent).toContain('لا يثبت أنك قائد الدولة'); await waitFor(() => p.$('#release-country'), 'unlink button');
+    click(p, p.$('#release-country')!); await waitFor(() => p.$('.dialog'), 'confirm'); click(p, btn(p, 'تأكيد')!);
+    await waitFor(() => p.$('.toast:not(.bad)'), 'released'); expect((await getGuildConfig(c.db, G1))!.countryId).toBeNull();
+    await updateGuildSettings(c.db, G2, { community_type: 'country', country_id: 'eg' }, 'u'); expect((await getGuildConfig(c.db, G2))!.countryId).toBe('eg');              // free for others
+  });
+  it('a pre-existing duplicate sees a notice (no identity of the other server) and keeps working', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G2, { community_type: 'country', country_id: 'eg' }, 'u');
+    await c.db.query('ALTER TABLE guilds DISABLE TRIGGER guilds_country_reservation'); await c.db.query(`UPDATE guilds SET community_type='country', country_id='eg' WHERE guild_id=$1`, [G1]); await c.db.query('ALTER TABLE guilds ENABLE TRIGGER guilds_country_reservation');
+    const p = await openSetup(c, l); await waitFor(() => p.$('#res-duplicate'), 'notice'); expect(p.$('#res-duplicate')!.textContent).toContain('abudujana15'); expect(p.$('#res-duplicate')!.textContent).not.toContain(G2); expect(p.$('#release-country')).toBeNull();
+  });
+  it('dialogs keep keyboard focus inside while open and give it back afterwards', async () => {
+    const { c, l } = await setup(); await updateGuildSettings(c.db, G1, { community_type: 'country', country_id: 'eg' }, 'u'); const p = await openSetup(c, l); await waitFor(() => p.$('#release-country'), 'unlink');
+    const opener = p.$('#release-country') as HTMLButtonElement; opener.focus(); click(p, opener); await waitFor(() => p.$('.dialog'), 'dialog');
+    const bs = p.$$('.dialog button') as HTMLButtonElement[]; bs[bs.length - 1]!.focus(); p.doc.dispatchEvent(new p.win.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })); expect(p.doc.activeElement).toBe(bs[0]);
+    p.doc.dispatchEvent(new p.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await waitFor(() => !p.$('.dialog'), 'closed'); expect(p.doc.activeElement).toBe(opener);
   });
 });

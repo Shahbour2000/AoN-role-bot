@@ -1,6 +1,6 @@
 import type { Fetched } from '@aon/core';
 import { AonHttp, type HttpClientOptions } from './http.js';
-import { extractCountryNames, extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
+import { extractCountryNames, extractCountryOptions, extractEntityName, type EntityOption, extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
 
 const ID = /^[A-Za-z0-9_-]{1,80}$/;
 const bad = (what: string): Fetched<never> => ({ status: 'error', message: `invalid ${what}` });
@@ -25,6 +25,19 @@ export class AonClient {
       this.countryNameCache = { at: now, names: res.data };
     }
     return this.countryNameCache.names.get(id) ?? null;
+  }
+  /** All countries as options (unverified shape: anything unrecognised is `incomplete`, never a guess). */
+  async countryOptions(): Promise<Fetched<EntityOption[]>> { return extractCountryOptions(await this.countries()); }
+  /** Server-side unit search via the documented `GET /units?search=&countryId=`. The response shape is not sampled: it is read with the verified list extractor, otherwise `incomplete`. */
+  async searchUnits(search: string, countryId?: string): Promise<Fetched<UnitSummary[]>> {
+    const q = search.trim().slice(0, 40);
+    if (countryId !== undefined && !ID.test(countryId)) return bad('countryId');
+    return extractUnits(await this.http.get('/units', { search: q || undefined, countryId }));
+  }
+  /** Name of one party/unit (unverified single-entity shape, only a top-level string `name` is read). */
+  async entityName(type: 'party' | 'unit', id: string): Promise<Fetched<string>> {
+    if (!ID.test(id)) return bad('id');
+    return extractEntityName(await this.http.get(type === 'party' ? `/parties/${id}` : `/units/${id}`));
   }
   countrySummary(id: string) { return ID.test(id) ? this.http.get(`/countries/${id}/summary`) : Promise.resolve(bad('countryId')); }
   async countryUnits(id: string): Promise<Fetched<UnitSummary[]>> { return ID.test(id) ? extractUnits(await this.http.get(`/countries/${id}/units`)) : bad('countryId'); }

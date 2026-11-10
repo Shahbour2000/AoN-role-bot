@@ -3,10 +3,10 @@ import { extname, join, normalize } from 'node:path';
 import fastifyCookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Fetched } from '@aon/core';
-import type { PartySummary, PlayerIdentity, UnitSummary } from '@aon/client';
+import { MODULES_BY_TYPE, ENTITY_BY_TYPE, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, type Fetched } from '@aon/core';
+import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
-  ROLE_KINDS, BUILD_ROLE_KEYS, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
+  ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
   getSyncStatus, listAudit, listLinksDetailed, listRoleMappings, listSyncJobs, removeRoleMapping, reviewLink, saveLadder, updateGuildSettings, DEFAULT_LADDER_SEED, type Db,
 } from '@aon/db';
 import type { WebConfig } from './config.js';
@@ -18,6 +18,10 @@ export interface WebGame {
   playerByName(u: string): Promise<Fetched<PlayerIdentity>>;
   countryParties(id: string): Promise<Fetched<PartySummary[]>>;
   countryUnits(id: string): Promise<Fetched<UnitSummary[]>>;
+  /** Optional capabilities for the setup selectors. Missing => the selector reports `game_unavailable` and the dashboard keeps its manual fallback. */
+  countryOptions?(): Promise<Fetched<EntityOption[]>>;
+  searchUnits?(search: string, countryId?: string): Promise<Fetched<UnitSummary[]>>;
+  entityName?(type: 'party' | 'unit', id: string): Promise<Fetched<string>>;
 }
 export interface WebDeps {
   db: Db; cfg: WebConfig; oauth: DiscordOAuth; botRest: DiscordBotRest; game: WebGame;
@@ -195,7 +199,14 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
 
   // ------------------------------------------------------------------ settings
   /** Settings as the dashboard sees them: interval in hours plus the next scheduled run. */
-  const settingsView = async (guildId: string) => { const c = await getGuildConfig(db, guildId); return c && { ...c, syncIntervalHours: c.syncIntervalMinutes / 60 }; };
+  const settingsView = async (guildId: string) => {
+    const c = await getGuildConfig(db, guildId); if (!c) return c;
+    // Reservation status for the dashboard. It never reveals WHICH other server holds a country, only that one does.
+    let countryReservation: 'none' | 'held' | 'held_by_other' = 'none';
+    if (c.communityType === 'country' && c.countryId) countryReservation = (await getCountryReservation(db, guildId)) ? 'held' : (await isCountryReservedByOther(db, guildId, c.countryId)) ? 'held_by_other' : 'none';
+    return { ...c, syncIntervalHours: c.syncIntervalMinutes / 60, countryReservation, allowedKinds: allowedKinds(c.communityType), allowedModules: allowedModules(c.communityType),
+      typeRules: Object.fromEntries(Object.entries(MODULES_BY_TYPE).map(([t, m]) => [t, { modules: m, entity: ENTITY_BY_TYPE[t as keyof typeof ENTITY_BY_TYPE] }])) };
+  };
   const idOrNull = GAME_ID.nullable();
   const SettingsBody = z.object({
     language: z.enum(['ar', 'en']), communityType: z.enum(['country', 'party', 'military_unit', 'general']),          // alliance servers are not configurable (no verified data)
@@ -204,6 +215,8 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     modules: z.object({ government: z.boolean(), party: z.boolean(), unit: z.boolean(), alliance: z.literal(false), ranks: z.boolean() }).strict(),
     linkMode: z.enum(['direct', 'staff_approval']), unitLeaderReplacesMember: z.boolean(),
     demotionMode: z.enum(['never', 'immediate', 'grace']), demotionGraceDays: z.number().int().min(1).max(365),
+    /** Must be true to apply a server-type change that makes existing role mappings inapplicable (they are then removed). */
+    confirmRemoveIncompatible: z.boolean(),
     autoSyncEnabled: z.boolean(), syncIntervalHours: z.union([z.literal(3), z.literal(6), z.literal(12), z.literal(24)]),
   }).partial().strict();
 
@@ -213,6 +226,13 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const p = SettingsBody.safeParse(req.body);
     if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     const b = p.data;
+    const cur = await getGuildConfig(db, a.guildId); if (!cur) return fail(reply, 404, 'bot_not_installed');
+    const newType = b.communityType ?? cur.communityType;
+    // A country server gives its country up ONLY through the explicit release action (DELETE .../country), never by saving an empty field.
+    if (b.countryId === null && newType === 'country' && cur.communityType === 'country' && cur.countryId) return fail(reply, 422, 'use_release_endpoint');
+    // Modules the chosen type does not offer are switched off, and the response says which ones (never dropped silently).
+    const coercedModules = b.modules ? disallowedEnabledModules(newType, b.modules) : [];
+    if (b.modules && coercedModules.length) b.modules = { ...b.modules, ...Object.fromEntries(coercedModules.map((k) => [k, false])) } as typeof b.modules;
     const patch: Parameters<typeof updateGuildSettings>[2] = {};
     if (b.language !== undefined) patch.language = b.language;
     if (b.communityType !== undefined) patch.community_type = b.communityType;
@@ -227,10 +247,22 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (b.syncIntervalHours !== undefined) patch.sync_interval_minutes = b.syncIntervalHours * 60;
     if (b.linkMode !== undefined) patch.require_staff_approval = b.linkMode === 'staff_approval';
     if (b.unitLeaderReplacesMember !== undefined) patch.unit_leader_replaces_member = b.unitLeaderReplacesMember;
-    await updateGuildSettings(db, a.guildId, patch, a.session.discordUserId, clock());     // re-anchors the durable schedule atomically
+    let removedMappings = 0;
+    try { removedMappings = (await updateGuildSettings(db, a.guildId, patch, a.session.discordUserId, clock(), { confirmRemoveIncompatible: b.confirmRemoveIncompatible === true })).removedMappings.length; }   // re-anchors the durable schedule atomically
+    catch (e) {
+      if (e instanceof CountryReservedError) return fail(reply, 409, 'country_reserved');                          // nothing was saved
+      if (e instanceof IncompatibleMappingsError) return fail(reply, 409, 'incompatible_mappings', { mappings: e.mappings });   // nothing was saved; resend with confirmRemoveIncompatible
+      throw e;
+    }
     // Enabling the optional military-rank system on a server that has no ladder yet creates the 17 starter ranks (no Discord roles mapped).
     if (b.modules?.ranks && (await getLadder(db, a.guildId)).length === 0) await saveLadder(db, a.guildId, DEFAULT_LADDER_SEED, a.session.discordUserId);
-    return { settings: await settingsView(a.guildId) };
+    return { settings: await settingsView(a.guildId), notices: { coercedModules, removedMappings } };
+  });
+
+  // The explicit, audited "unlink": the only way a country server gives its country (and therefore the reservation) up.
+  app.delete('/api/guilds/:guildId/country', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    return (await releaseCountry(db, a.guildId, a.session.discordUserId)) ? { settings: await settingsView(a.guildId) } : fail(reply, 409, 'no_country');
   });
 
   // ------------------------------------------------------------------ roles (live from Discord, via the bot)
@@ -292,6 +324,8 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     if (isBuildKind(p.data.kind)) return fail(reply, 422, 'use_builds_endpoint');             // build roles have their own permanent settings
     if (p.data.kind.startsWith('alliance_')) return fail(reply, 422, 'feature_unavailable');     // no backing implementation: the game API exposes no verified alliance data
+    const cfgM = await getGuildConfig(db, a.guildId);
+    if (!cfgM || !isKindAllowed(cfgM.communityType, p.data.kind)) return fail(reply, 422, 'kind_not_allowed_for_type');   // the server type decides which roles exist
     const roles = await rolesFor(a.guildId);
     if (!roles) return fail(reply, 503, 'discord_unavailable');
     const role = roles.find((r) => r.id === p.data.discordRoleId);
@@ -376,6 +410,64 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const res = await setBuildRoles(db, { guildId: a.guildId, roles, actor: a.session.discordUserId });
     if (!res.ok) return fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code === 'ROLE_CONFLICT' ? 'role_conflict' : res.code === 'DUPLICATE_ROLE' ? 'duplicate_role' : 'role_invalid', { roleIds: res.roleIds });
     return { ok: true };
+  });
+
+  // ------------------------------------------------------------------ searchable entity selectors (setup page)
+  // Lists are cached 5 minutes (the game API allows 60 requests/minute/IP) and searched/paginated HERE, so the browser never receives a whole country list.
+  // Verified sources: a country's parties and units. UNVERIFIED sources (flagged `verified:false`): the country list and the global unit search.
+  const entityCache = new Map<string, { at: number; value: EntityOption[] }>();
+  const ENTITY_TTL_MS = 5 * 60_000;
+  const entityLimit = limiter(120, 60_000, () => clock().getTime());
+  async function cachedOptions(key: string, load: () => Promise<Fetched<EntityOption[]>>): Promise<Fetched<EntityOption[]>> {
+    const t = clock().getTime(); const hit = entityCache.get(key);
+    if (hit && t - hit.at < ENTITY_TTL_MS) return { status: 'ok', data: hit.value };
+    const r = await load();
+    if (r.status === 'ok') { entityCache.set(key, { at: t, value: r.data }); if (entityCache.size > 300) entityCache.delete(entityCache.keys().next().value as string); }
+    return r;
+  }
+  const norm = (x: string) => x.normalize('NFKC').toLocaleLowerCase();
+  const EntityQuery = z.object({ q: z.string().max(40).default(''), limit: z.coerce.number().int().min(1).max(50).default(20), offset: z.coerce.number().int().min(0).max(5000).default(0), countryId: GAME_ID.optional() }).strict();
+  const EntityType = z.enum(['country', 'party', 'unit']);
+
+  app.get('/api/guilds/:guildId/entities/:type', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    if (!entityLimit(`e:${a.session.discordUserId}`)) return fail(reply, 429, 'rate_limited');
+    const type = EntityType.safeParse((req.params as { type: string }).type); const q = EntityQuery.safeParse(req.query);
+    if (!type.success || !q.success) return fail(reply, 422, 'validation');
+    const { q: term, limit, offset, countryId } = q.data; const g = deps.game;
+    let res: Fetched<EntityOption[]>; let verified = true;
+    if (type.data === 'country') {
+      if (!g.countryOptions) return fail(reply, 503, 'game_unavailable');
+      verified = false; res = await cachedOptions('countries', () => g.countryOptions!());
+    } else if (type.data === 'party') {
+      if (!countryId) return fail(reply, 422, 'country_required');
+      res = await cachedOptions(`parties:${countryId}`, async () => { const r = await g.countryParties(countryId); return r.status === 'ok' ? { status: 'ok', data: partyOptions(r.data) } : r; });
+    } else if (countryId) {
+      res = await cachedOptions(`units:${countryId}`, async () => { const r = await g.countryUnits(countryId); return r.status === 'ok' ? { status: 'ok', data: unitOptions(r.data) } : r; });
+    } else {
+      // No country filter: the game API's own search (documented, shape unverified). Needs a term so we never page the whole world.
+      if (norm(term).trim().length < 2) return { items: [], total: 0, offset, limit, hasMore: false, verified: false, needsQuery: true };
+      if (!g.searchUnits) return fail(reply, 503, 'game_unavailable');
+      verified = false; res = await cachedOptions(`unitsearch:${norm(term).trim()}`, async () => { const r = await g.searchUnits!(term); return r.status === 'ok' ? { status: 'ok', data: unitOptions(r.data) } : r; });
+    }
+    if (res.status !== 'ok') return fail(reply, res.status === 'not_found' ? 404 : 503, `game_${res.status}`);   // `game_incomplete` = response not recognised => dashboard falls back to manual input
+    const n = norm(term).trim();
+    const hits = (n ? res.data.filter((o) => norm(o.name).includes(n)) : [...res.data]).sort((x, y) => (Number(norm(y.name).startsWith(n)) - Number(norm(x.name).startsWith(n))) || x.name.localeCompare(y.name));
+    return { items: hits.slice(offset, offset + limit), total: hits.length, offset, limit, hasMore: offset + limit < hits.length, verified };
+  });
+
+  // Display name of the currently selected entity (never fails the page: unknown => name:null).
+  app.get('/api/guilds/:guildId/entities/:type/:id', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    if (!entityLimit(`e:${a.session.discordUserId}`)) return fail(reply, 429, 'rate_limited');
+    const { type, id } = req.params as { type: string; id: string }; const t = EntityType.safeParse(type);
+    if (!t.success || !GAME_ID.safeParse(id).success) return fail(reply, 422, 'validation');
+    let name: string | null = null; const g = deps.game;
+    try {
+      if (t.data === 'country' && g.countryOptions) { const r = await cachedOptions('countries', () => g.countryOptions!()); if (r.status === 'ok') name = r.data.find((o) => o.id.toLowerCase() === id.toLowerCase())?.name ?? null; }
+      else if (t.data !== 'country' && g.entityName) { const r = await cachedOptions(`name:${t.data}:${id}`, async () => { const x = await g.entityName!(t.data as 'party' | 'unit', id); return x.status === 'ok' ? { status: 'ok', data: [{ id, name: x.data }] } : x; }); if (r.status === 'ok') name = r.data[0]?.name ?? null; }
+    } catch { name = null; }
+    return { id, name };
   });
 
   // ------------------------------------------------------------------ game entity pickers (verified mappers only)

@@ -1,4 +1,4 @@
-import { expect } from "vitest";
+import { afterEach, expect } from "vitest";
 import { PGlite } from '@electric-sql/pglite';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../src/index.js';
@@ -26,6 +26,15 @@ function adapt(pg: any, inTx = false): Db {
  * PostgreSQL server. Each call gets its own freshly created database, so tests never share state.
  */
 let dbCounter = 0;
+// Every real-PostgreSQL pool a test opens is closed after that test; otherwise a long suite exhausts the server's connection limit
+// ("too many clients already"). PGlite databases are in-process and need no cleanup.
+const openPools: Array<{ pool: { close(): Promise<void> }; name: string }> = [];
+afterEach(async () => {
+  const url = process.env['TEST_DATABASE_URL']; const open = openPools.splice(0);
+  await Promise.all(open.map((o) => o.pool.close().catch(() => undefined)));
+  if (url && open.length) { const admin = createPgDb(url, { max: 1 }); for (const o of open) await admin.query(`DROP DATABASE IF EXISTS ${o.name} WITH (FORCE)`).catch(() => undefined); await admin.close().catch(() => undefined); }   // no test databases pile up
+});
+const track = <T extends { close(): Promise<void> }>(d: T, name: string): T => { openPools.push({ pool: d, name }); return d; };
 /** An EMPTY database (no migrations applied), on the same backend selection as freshDb. */
 export async function emptyDb(): Promise<Db> {
   const url = process.env['TEST_DATABASE_URL'];
@@ -35,7 +44,7 @@ export async function emptyDb(): Promise<Db> {
   await admin.query(`CREATE DATABASE ${name}`);
   await admin.close();
   const u = new URL(url); u.pathname = `/${name}`;
-  return createPgDb(u.toString(), { max: 4 });
+  return track(createPgDb(u.toString(), { max: 4 }), name);
 }
 export async function freshDb(): Promise<Db> {
   const url = process.env['TEST_DATABASE_URL'];
@@ -49,7 +58,7 @@ export async function freshDb(): Promise<Db> {
   await admin.query(`CREATE DATABASE ${name}`);
   await admin.close();
   const u = new URL(url); u.pathname = `/${name}`;
-  const db = createPgDb(u.toString(), { max: 4 });
+  const db = track(createPgDb(u.toString(), { max: 4 }), name);
   await migrate(db, MIGRATIONS_DIR);
   return db;
 }

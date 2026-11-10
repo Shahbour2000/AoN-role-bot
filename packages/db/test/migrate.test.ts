@@ -12,10 +12,10 @@ describe('migrations', () => {
     const db = { query: async (s: string, p?: unknown[]) => ({ rows: (p === undefined ? (await pg.exec(s)).at(-1)?.rows : (await pg.query(s, p)).rows) ?? [] }) as never,
       tx: async <T>(fn: (d: never) => Promise<T>) => pg.transaction(async (t) => fn({ query: async (s: string, p?: unknown[]) => ({ rows: (p === undefined ? (await t.exec(s)).at(-1)?.rows : (await t.query(s, p)).rows) ?? [] }), tx: async (f: (d: never) => Promise<unknown>) => f(undefined as never) } as never)) };
     const first = await migrate(db as never, MIGRATIONS_DIR);
-    expect(first.applied).toEqual(['0001_init.sql', '0002_government_role_kind.sql', '0003_rank_enabled_arabic_default.sql', '0004_dashboard_sessions.sql', '0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql']);
+    expect(first.applied).toEqual(['0001_init.sql', '0002_government_role_kind.sql', '0003_rank_enabled_arabic_default.sql', '0004_dashboard_sessions.sql', '0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql', '0008_country_reservation.sql']);
     const second = await migrate(db as never, MIGRATIONS_DIR);
     expect(second.applied).toEqual([]);
-    expect(second.alreadyApplied).toEqual(['0001_init.sql', '0002_government_role_kind.sql', '0003_rank_enabled_arabic_default.sql', '0004_dashboard_sessions.sql', '0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql']);
+    expect(second.alreadyApplied).toEqual(['0001_init.sql', '0002_government_role_kind.sql', '0003_rank_enabled_arabic_default.sql', '0004_dashboard_sessions.sql', '0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql', '0008_country_reservation.sql']);
   });
   it('aborts if an applied migration file was edited (no silent drift)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'mig-'));
@@ -47,7 +47,7 @@ describe('upgrading an existing database to the durable schedule (migration 0005
     await ins('g90', true, 90); await ins('g360', true, 360); await ins('g1000', true, 1000); await ins('g45off', false, 45); await ins('g30', true, 30); await ins('g10080', true, 10080);
     await db.query(`INSERT INTO sync_jobs (guild_id, kind, status) VALUES ('g90','all','succeeded')`);
     const res = await migrate(db, MIGRATIONS_DIR);
-    expect(res.applied).toEqual(['0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql']);
+    expect(res.applied).toEqual(['0005_durable_schedule.sql', '0006_linking_party_roles_unit_options.sql', '0007_player_build_roles.sql', '0008_country_reservation.sql']);
     const rows = (await db.query<{ guild_id: string; sync_interval_minutes: number; auto_sync_enabled: boolean; next_sync_at: Date | null }>('SELECT guild_id, sync_interval_minutes, auto_sync_enabled, next_sync_at FROM guilds ORDER BY guild_id')).rows;
     const by = Object.fromEntries(rows.map((r) => [r.guild_id, r]));
     expect(rows.map((r) => [r.guild_id, r.sync_interval_minutes])).toEqual([['g1000', 1440], ['g10080', 1440], ['g30', 180], ['g360', 360], ['g45off', 180], ['g90', 180]]);

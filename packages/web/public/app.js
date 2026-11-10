@@ -1,7 +1,7 @@
 (() => {
-  const { t, el, getLang, fmtNum, fmtDate } = window.AON;
+  const { t, el, icon, paintIcons, getLang, fmtNum, fmtDate } = window.AON;
   const root = document.getElementById('root');
-  const state = { csrf: '', user: null };
+  const state = { csrf: '', user: null, guilds: null };
   let renderToken = 0;
 
   // ---------------------------------------------------------------- plumbing
@@ -19,13 +19,41 @@
     document.querySelectorAll('.toast').forEach((n) => n.remove());
     const n = el('div', { class: `toast${bad ? ' bad' : ''}`, role: 'status', text: msg }); document.body.append(n); setTimeout(() => n.remove(), 4000);
   }
+  // Modal helper: keeps Tab inside the dialog, Escape cancels, focus returns to where it was.
+  function openModal(ov, onCancel, focusEl) {
+    const prev = document.activeElement;
+    const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); prev?.focus?.(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); onCancel(); return; }
+      if (e.key !== 'Tab') return;
+      const f = [...ov.querySelectorAll('button, input, select, a[href], [tabindex]:not([tabindex="-1"])')].filter((n) => !n.disabled && !n.hidden);
+      if (!f.length) return; const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKey, true); document.body.append(ov); (focusEl || ov.querySelector('button'))?.focus();
+    return close;
+  }
   function confirmDialog(title, text, danger = false) {
     return new Promise((resolve) => {
-      const done = (v) => { ov.remove(); resolve(v); };
+      let close = () => {}; const done = (v) => { close(); resolve(v); };
       const ov = el('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
         el('div', { class: 'dialog' }, el('h3', { text: title }), el('p', { class: 'muted', text }),
           el('div', { class: 'row' }, el('button', { class: `btn ${danger ? 'danger' : 'primary'}`, type: 'button', text: t('confirm'), onclick: () => done(true) }), el('button', { class: 'btn', type: 'button', text: t('cancel'), onclick: () => done(false) }))));
-      document.body.append(ov); ov.querySelector('button').focus();
+      close = openModal(ov, () => resolve(false));
+    });
+  }
+  // Lists exactly what a confirmed server-type change will delete; the destructive button stays disabled until the box is ticked.
+  function removalDialog(title, intro, items, confirmLabel) {
+    return new Promise((resolve) => {
+      let close = () => {}; const done = (v) => { close(); resolve(v); };
+      const ack = el('input', { type: 'checkbox', id: 'removal-ack' });
+      const go = el('button', { class: 'btn danger', type: 'button', disabled: true, text: confirmLabel, onclick: () => done(true) });
+      ack.addEventListener('change', () => { go.disabled = !ack.checked; });
+      const ov = el('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        el('div', { class: 'dialog wide' }, el('h3', { text: title }), el('p', { class: 'muted', text: intro }), el('ul', { class: 'affected' }, items.map((x) => el('li', {}, el('strong', { text: x.kind }), ' · ', el('bdi', { text: x.role })))),
+          el('p', { class: 'muted hint', text: t('ty_keep_note') }), el('label', {}, ack, ' ', t('ty_ack')),
+          el('div', { class: 'actions' }, el('button', { class: 'btn', type: 'button', text: t('cancel'), onclick: () => done(false) }), go)));
+      close = openModal(ov, () => resolve(false), ack);
     });
   }
   const loading = () => root.replaceChildren(el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }));
@@ -44,7 +72,8 @@
   function parseRoute() { const m = location.hash.match(/^#\/g\/(\d{5,25})(?:\/(\w+))?$/); return m ? { guild: m[1], tab: m[2] || 'overview' } : { guild: null }; }
   async function route() {
     const token = ++renderToken; const r = parseRoute();
-    loading();
+    closeDrawer(); loading();
+    if (!r.guild) { renderNav(null); renderSwitcher(null); }
     const view = r.guild ? await guildShell(r.guild, r.tab, token) : await guildList(token);
     if (token === renderToken && view) root.replaceChildren(...view);
   }
@@ -53,35 +82,99 @@
   async function guildList() {
     const res = await api('GET', '/api/guilds');
     if (!res.ok) return [el('p', { class: 'err', text: errText(res) })];
-    const gs = res.data.guilds;
-    return [el('h2', { text: t('pick_server') }), gs.length ? el('div', { class: 'grid' }, gs.map((g) => el('div', { class: 'card' },
-      el('h3', { text: g.name }), g.installed ? badge(t('manage'), 'ok') : badge(t('not_installed'), 'warn'),
-      el('div', { class: 'row' }, g.installed ? el('a', { class: 'btn primary', href: `#/g/${g.id}/overview`, text: t('manage') }) : el('a', { class: 'btn', href: g.inviteUrl, text: t('install') }))))) : el('div', { class: 'empty', text: t('no_servers') })];
+    const gs = res.data.guilds; state.guilds = gs;
+    return [el('div', { class: 'page-head' }, el('h2', { text: t('pick_server') }), el('p', { text: t('pd_pick') })),
+      gs.length ? el('div', { class: 'grid' }, gs.map((g) => el('div', { class: 'card' },
+        el('h3', {}, icon('server'), ' ', el('bdi', { text: g.name })), g.installed ? badge(t('manage'), 'ok') : badge(t('not_installed'), 'warn'),
+        el('div', { class: 'row' }, g.installed ? el('a', { class: 'btn primary', href: `#/g/${g.id}/overview`, text: t('manage') }) : el('a', { class: 'btn', href: g.inviteUrl, text: t('install') }))))) : el('div', { class: 'empty', text: t('no_servers') })];
   }
 
-  // ---------------------------------------------------------------- guild shell
+  // ---------------------------------------------------------------- guild shell (sidebar nav, server switcher, page header)
   const TABS = ['overview', 'setup', 'roles', 'builds', 'ranks', 'players', 'sync', 'audit', 'diag'];
   const PAGES = { overview, setup, roles: rolesPage, builds: buildsPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
+  const NAV_GROUPS = [['nav_general', ['overview', 'setup']], ['nav_roles', ['roles', 'builds', 'ranks']], ['nav_community', ['players']], ['nav_ops', ['sync', 'audit', 'diag']]];
+  const guildName = (g) => (state.guilds || []).find((x) => x.id === g)?.name || t('sw_unknown');
+
+  function closeDrawer() {
+    document.getElementById('sidebar').classList.remove('open'); document.getElementById('scrim').classList.remove('show');
+    const mt = document.getElementById('menu-toggle'); mt.setAttribute('aria-expanded', 'false'); mt.setAttribute('aria-label', t('menu_open'));
+  }
+  function renderNav(g, tab) {
+    const nav = document.getElementById('nav');
+    if (!g) { nav.replaceChildren(el('div', { class: 'nav-group' }, el('a', { href: '#/', 'aria-current': 'page' }, icon('server'), el('span', { text: t('sw_all') })))); return; }
+    nav.replaceChildren(...NAV_GROUPS.map(([gl, keys]) => el('div', { class: 'nav-group' }, el('h4', { text: t(gl) }),
+      keys.map((k) => el('a', { href: `#/g/${g}/${k}`, 'aria-current': k === tab ? 'page' : false }, icon(k), el('span', { text: t(`tab_${k}`) }))))));
+  }
+  async function renderSwitcher(g, tab) {
+    const box = document.getElementById('switcher');
+    if (!g) { box.hidden = true; box.replaceChildren(); return; }
+    box.hidden = false;
+    const draw = () => {
+      const btn = el('button', { class: 'btn', type: 'button', 'aria-haspopup': 'true', 'aria-expanded': 'false' }, icon('server'), el('span', { class: 'name' }, el('bdi', { text: guildName(g) })), icon('chevron'));
+      const menu = el('div', { class: 'menu', hidden: true }, (state.guilds || []).filter((x) => x.installed && x.id !== g).map((x) => el('a', { href: `#/g/${x.id}/${tab}` }, icon('server'), el('span', { class: 'label' }, el('bdi', { text: x.name })))), el('a', { href: '#/' }, icon('back', 'flip'), el('span', { class: 'label', text: t('sw_all') })));
+      const toggle = (open) => { menu.hidden = !open; btn.setAttribute('aria-expanded', String(open)); };
+      btn.addEventListener('click', () => toggle(menu.hidden));
+      menu.addEventListener('click', () => toggle(false));
+      box.replaceChildren(btn, menu);
+    };
+    draw();
+    if (!state.guilds) { const r = await api('GET', '/api/guilds'); if (r.ok) { state.guilds = r.data.guilds; draw(); } }
+  }
+
+  // ---- language switching keeps unsaved work: controls are captured by position before the re-render and restored after it.
+  function captureState() {
+    const c = document.getElementById('tab-content'); if (!c) return null;
+    const controls = [...c.querySelectorAll('input, select, textarea')].map((n) => ({ tag: n.tagName, type: n.type, v: n.type === 'checkbox' || n.type === 'radio' ? n.checked : n.value }));
+    const f = document.activeElement; const focus = c.contains(f) ? [...c.querySelectorAll('input, select, textarea, button')].indexOf(f) : -1;
+    return { hash: location.hash, scroll: window.scrollY, controls, focus, open: [...c.querySelectorAll('details')].map((d) => d.open) };
+  }
+  function restoreState(c, snap) {
+    if (!snap || snap.hash !== location.hash) return;
+    // Controls are matched by position. A restored <select> may rebuild the form (e.g. the server type), so after each such change the
+    // list is read again and restoring continues from the next control; the first structural mismatch stops it (never writes to the wrong control).
+    let i = 0;
+    for (let pass = 0; pass < 6 && i < snap.controls.length; pass++) {
+      const nodes = [...c.querySelectorAll('input, select, textarea')]; let rebuilt = false;
+      for (; i < snap.controls.length && i < nodes.length && !rebuilt; i++) {
+        const n = nodes[i], w = snap.controls[i];
+        if (n.tagName !== w.tag || n.type !== w.type) { i = snap.controls.length; break; }
+        const checkable = n.type === 'checkbox' || n.type === 'radio'; const have = checkable ? n.checked : n.value;
+        if (have === w.v) continue;                                  // already equal (e.g. auto-saved): do not re-fire handlers
+        if (checkable) n.checked = w.v; else n.value = w.v;
+        n.dispatchEvent(new Event(checkable || n.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
+        if (n.tagName === 'SELECT') rebuilt = true;                  // handlers may have replaced the controls after this one
+      }
+      if (!rebuilt) break;
+    }
+    [...c.querySelectorAll('details')].forEach((d, k) => { if (snap.open[k] !== undefined) d.open = snap.open[k]; });
+    if (snap.focus >= 0) [...c.querySelectorAll('input, select, textarea, button')][snap.focus]?.focus({ preventScroll: true });
+    window.scrollTo(0, snap.scroll);
+  }
+  let pendingSnap = null;
+
   async function guildShell(g, tab, token) {
     if (!PAGES[tab]) tab = 'overview';
+    const snap = pendingSnap; pendingSnap = null;
+    renderNav(g, tab); renderSwitcher(g, tab);
     const content = el('div', { id: 'tab-content' });
-    const nav = el('nav', { class: 'tabs', 'aria-label': 'sections' }, el('a', { class: 'tab icon-flip', href: '#/', text: '←', 'aria-label': t('pick_server') }),
-      TABS.map((k) => el('a', { class: 'tab', href: `#/g/${g}/${k}`, 'aria-current': k === tab ? 'page' : false, text: t(`tab_${k}`) })));
-    queueMicrotask(async () => { if (token !== renderToken) return; const n = await PAGES[tab](g, content); if (token === renderToken && n) content.replaceChildren(...n); });
+    const head = el('div', { class: 'page-head' }, el('h2', {}, icon(tab), el('span', { text: t(`tab_${tab}`) })), el('p', { text: t(`pd_${tab}`) }));
+    queueMicrotask(async () => { if (token !== renderToken) return; const n = await PAGES[tab](g, content); if (token === renderToken && n) { content.replaceChildren(...n); paintIcons(content); restoreState(content, snap); } });
     content.replaceChildren(el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }));
-    return [nav, content];
+    return [head, content];
   }
 
   // ---------------------------------------------------------------- overview
+  const jobStatus = (st) => { const k = `js_${st}`; const v = t(k); return v === k ? String(st) : v; };
   async function overview(g) {
     const r = await api('GET', `/api/guilds/${g}/overview`);
     if (!r.ok) return [el('p', { class: 'err', text: errText(r) })];
     const d = r.data; const job = d.lastJob;
-    return [el('div', { class: 'grid' },
-      el('div', { class: 'card' }, el('h3', { text: t('ov_active') }), el('p', { text: fmtNum(d.links.active) })),
-      el('div', { class: 'card' }, el('h3', { text: t('ov_pending') }), el('p', { text: fmtNum(d.links.pending) })),
-      el('div', { class: 'card' }, el('h3', { text: t('ov_lastjob') }), el('p', { text: job ? `${job.status} · ${fmtDate(job.finishedAt || job.createdAt)}` : t('ov_none') })),
-      el('div', { class: 'card' }, el('h3', { text: t('sy_next') }), el('p', { text: d.settings && d.settings.autoSyncEnabled ? `${fmtDate(d.settings.nextSyncAt)} · ${t(`sy_every_${d.settings.syncIntervalHours}`)}` : t('sy_next_off') }))),
+    const stat = (ic, label, value, small = false) => el('div', { class: 'card stat' }, el('h3', {}, icon(ic), ' ', label), el('p', { class: small ? 'small' : '', text: value }));
+    return [el('div', { class: 'stats' },
+      stat('link', t('ov_active'), fmtNum(d.links.active)),
+      stat('players', t('ov_pending'), fmtNum(d.links.pending)),
+      stat('sync', t('ov_lastjob'), job ? `${jobStatus(job.status)} · ${fmtDate(job.finishedAt || job.createdAt)}` : t('ov_none'), true),
+      stat('clock', t('sy_next'), d.settings && d.settings.autoSyncEnabled ? `${fmtDate(d.settings.nextSyncAt)} · ${t(`sy_every_${d.settings.syncIntervalHours}`)}` : t('sy_next_off'), true)),
       d.warnings.length ? el('div', { class: 'card' }, el('h3', { text: t('ov_warnings') }), el('ul', {}, d.warnings.map((w) => el('li', { text: t(`w_${w}`) })))) : null,
       el('div', { class: 'card' }, el('h3', { text: t('ov_recent') }), d.recentAudit.length ? el('ul', {}, d.recentAudit.map((e) => el('li', { text: `${fmtDate(e.createdAt)} · ${e.action}` }))) : el('p', { class: 'muted', text: t('ov_none') }))];
   }
@@ -91,35 +184,92 @@
   async function setup(g) {
     const r = await api('GET', `/api/guilds/${g}/settings`);
     if (!r.ok) return [el('p', { class: 'err', text: errText(r) })];
-    const s = r.data.settings;
+    const s = r.data.settings; const rules = s.typeRules; const legacy = s.communityType === 'alliance';
     const sel = (opts, v, tk) => { const x = el('select', {}, opts.map((o) => el('option', { value: o, text: t(`${tk}${o}`) }))); x.value = v; return x; };
     const lang = el('select', {}, el('option', { value: 'ar', text: 'العربية' }), el('option', { value: 'en', text: 'English' })); lang.value = s.language;
-    // Alliance is NOT a configurable type. A guild that already stores it (legacy) sees it only as a disabled, localized "Closed" option.
-    const type = sel(['general', 'country', 'party', 'military_unit'], s.communityType, 'type_');
-    if (s.communityType === 'alliance') { type.append(el('option', { value: 'alliance', disabled: true, text: `${t('type_alliance')} — ${t('closed')}` })); type.value = 'alliance'; }
-    const ids = Object.fromEntries([['countryId', 'set_country'], ['partyId', 'set_party'], ['unitId', 'set_unit']].map(([k, l]) => [k, el('input', { class: 'wide', value: s[k] || '', maxlength: 80, 'aria-label': t(l) })]));
+    // Alliance is NOT a configurable type. A legacy server that stores it sees only a disabled, localized "Closed" option and keeps its data.
+    const type = sel(['general', 'country', 'party', 'military_unit'], legacy ? 'general' : s.communityType, 'type_');
+    if (legacy) { type.append(el('option', { value: 'alliance', disabled: true, text: `${t('type_alliance')} — ${t('closed')}` })); type.value = 'alliance'; }
+    const typeDesc = el('p', { class: 'muted type-desc', id: 'type-desc' });
+
+    // ---- searchable selectors (real game data; see picker.js). A party/unit server only uses a country as a search FILTER, which is not saved.
+    const mk = (kind, value, label, extra = {}) => AON.entityPicker({ type: kind, api, guildId: g, value, label, ...extra });
+    const held = s.countryReservation === 'held';
+    const pCountry = mk('country', s.communityType === 'country' || s.communityType === 'general' ? s.countryId : s.countryId, t('pk_l_country'), { allowClear: !(s.communityType === 'country' && held) });
+    const pScope = mk('country', s.countryId, t('pk_scope_country'), { hint: t('pk_scope_hint') });
+    const pParty = mk('party', s.partyId, t('pk_l_party'), { getCountryId: () => pScope.value() });
+    const pUnit = mk('unit', s.unitId, t('pk_l_unit'), { getCountryId: () => pScope.value() });
+    pScope.el.addEventListener('picker:change', () => { pParty.refresh(); pUnit.refresh(); });
+    const conflict = el('p', { class: 'err', id: 'country-conflict', role: 'alert', hidden: true });
+
     const dem = sel(['never', 'immediate', 'grace'], s.demotion.mode, 'dem_');
     const grace = el('input', { type: 'number', min: 1, max: 365, value: s.demotion.graceDays || 7 });
     const mods = Object.fromEntries(['government', 'party', 'unit', 'ranks'].map((m) => [m, el('input', { type: 'checkbox', checked: s.modules[m], id: `mod-${m}` })]));
     const presetNote = el('p', { class: 'muted', id: 'preset-note', hidden: true, text: t('type_preset_note') });
-    type.addEventListener('change', () => { const p = TYPE_PRESETS[type.value]; if (p) { for (const [k, v] of Object.entries(p)) mods[k].checked = v; presetNote.hidden = false; } });
     const linkMode = sel(['direct', 'staff_approval'], s.linkMode, 'lm_');
     const unitLeader = el('input', { type: 'checkbox', checked: s.unitLeaderReplacesMember, id: 'unit-leader-replaces' });
-    const save = el('button', { class: 'btn primary', type: 'button', text: t('save'), onclick: async () => {
-      const body = { language: lang.value, communityType: type.value, modules: { ...Object.fromEntries(Object.entries(mods).map(([k, v]) => [k, v.checked])), alliance: false },
-        demotionMode: dem.value, demotionGraceDays: Number(grace.value), linkMode: linkMode.value, unitLeaderReplacesMember: unitLeader.checked };
-      for (const [k, v] of Object.entries(ids)) body[k] = v.value.trim() || null;
-      const res = await api('PUT', `/api/guilds/${g}/settings`, body); toast(res.ok ? t('saved') : errText(res), !res.ok);
-    } });
+
+    // ---- the part of the form that depends on the selected type; rebuilt on every type change, controls are reused so nothing typed is lost
+    const area = el('div', { id: 'type-area' });
+    const reservation = () => {
+      if (s.communityType !== 'country' || !s.countryId) return null;
+      const out = [];
+      if (held) out.push(el('p', {}, badge(t('res_held'), 'ok')), el('button', { class: 'btn danger', type: 'button', id: 'release-country', text: t('res_release'), onclick: async () => {
+        if (!(await confirmDialog(t('res_release_title'), t('res_release_text'), true))) return;
+        const res = await api('DELETE', `/api/guilds/${g}/country`); if (res.ok) { toast(t('res_released')); route(); } else toast(errText(res), true); } }));
+      else if (s.countryReservation === 'held_by_other') out.push(el('div', { class: 'notice', id: 'res-duplicate', text: t('res_duplicate') }));
+      return out;
+    };
+    const renderArea = () => {
+      const ty = type.value; const rule = rules[ty] || { modules: [], entity: null };
+      typeDesc.textContent = legacy && ty === 'alliance' ? t('ty_legacy') : t(`tyd_${ty}`);
+      const nodes = [];
+      if (ty === 'country') nodes.push(el('h3', { text: t('ty_entity_country') }), pCountry.el, el('p', { class: 'muted hint', text: t('res_note') }), ...(reservation() || []));
+      else if (ty === 'general') nodes.push(el('h3', { text: t('ty_entity_general') }), pCountry.el, el('p', { class: 'muted hint', text: t('ty_general_note') }));
+      else if (ty === 'party') nodes.push(el('h3', { text: t('ty_entity_party') }), pScope.el, pParty.el);
+      else if (ty === 'military_unit') nodes.push(el('h3', { text: t('ty_entity_unit') }), pScope.el, pUnit.el);
+      nodes.push(conflict);
+      if (ty !== 'alliance') nodes.push(el('h3', { text: t('set_modules') }), presetNote, el('div', { class: 'row' }, rule.modules.map((m) => el('label', {}, mods[m], ' ', t(`mod_${m}`)))));
+      area.replaceChildren(...nodes);
+    };
+    type.addEventListener('change', () => { const p = TYPE_PRESETS[type.value]; if (p) { for (const [k, v] of Object.entries(p)) mods[k].checked = v; presetNote.hidden = false; } conflict.hidden = true; renderArea(); });
+    renderArea();
+
+    async function save(confirmRemoval) {
+      const ty = type.value; const body = { language: lang.value, demotionMode: dem.value, demotionGraceDays: Number(grace.value), linkMode: linkMode.value, unitLeaderReplacesMember: unitLeader.checked };
+      if (!legacy) {
+        body.communityType = ty;
+        const allowed = (rules[ty] || { modules: [] }).modules;
+        body.modules = { ...Object.fromEntries(['government', 'party', 'unit', 'ranks'].map((m) => [m, allowed.includes(m) ? mods[m].checked : false])), alliance: false };
+        if (ty === 'country' || ty === 'general') body.countryId = pCountry.value();
+        if (ty === 'party') body.partyId = pParty.value();
+        if (ty === 'military_unit') body.unitId = pUnit.value();
+      }
+      if (confirmRemoval) body.confirmRemoveIncompatible = true;
+      const res = await api('PUT', `/api/guilds/${g}/settings`, body);
+      if (res.ok) {
+        const n = res.data.notices || { coercedModules: [], removedMappings: 0 };
+        toast(t('saved')); if (n.removedMappings) toast(t('ty_removed', { n: n.removedMappings }));
+        if (n.coercedModules.length) toast(t('ty_modules_off', { names: n.coercedModules.map((m) => t(`mod_${m}`)).join('، ') }));
+        return route();
+      }
+      if (res.data?.error === 'incompatible_mappings') {
+        const rl = await api('GET', `/api/guilds/${g}/roles`); const names = new Map(rl.ok ? rl.data.roles.map((x) => [x.id, x.name]) : []);
+        const items = res.data.mappings.map((m) => ({ kind: t(`k_${m.kind}`), role: names.get(m.discordRoleId) || t('ty_role_missing') }));
+        if (await removalDialog(t('ty_confirm_title', { type: t(`type_${ty}`) }), t('ty_confirm_intro', { n: items.length }), items, t('ty_confirm_btn'))) return save(true);
+        return;
+      }
+      if (res.data?.error === 'country_reserved') { conflict.textContent = t('e_country_reserved'); conflict.hidden = false; conflict.scrollIntoView?.({ block: 'nearest' }); return; }
+      toast(errText(res), true);
+    }
+    const saveBtn = el('button', { class: 'btn primary', type: 'button', id: 'save-settings', text: t('save'), onclick: () => save(false) });
     return [el('div', { class: 'card' },
-      el('div', { class: 'row' }, field(t('set_language'), lang), field(t('set_type'), type)), presetNote,
-      el('div', { class: 'row' }, Object.entries(ids).map(([k, inp], i) => field(t(['set_country', 'set_party', 'set_unit'][i]), inp))),
-      el('h3', { text: t('set_modules') }),
-      el('div', { class: 'row' }, Object.entries(mods).map(([k, inp]) => el('label', {}, inp, ' ', t(`mod_${k}`)))),
-      el('div', { class: 'row' }, field(t('set_demotion'), dem), field(t('set_grace'), grace)),
-      el('div', { class: 'row' }, field(t('set_link_mode'), linkMode)), el('p', { class: 'muted', text: t('lm_note') }),
-      el('div', { class: 'row' }, el('label', {}, unitLeader, ' ', t('set_unit_leader'))),
-      el('div', { class: 'row' }, save))];
+      el('div', { class: 'row' }, field(t('set_language'), lang), field(t('set_type'), type)), typeDesc, area),
+      el('div', { class: 'card' }, el('details', { id: 'advanced' }, el('summary', { text: t('set_advanced') }),
+        el('div', { class: 'row' }, field(t('set_demotion'), dem), field(t('set_grace'), grace)),
+        el('div', { class: 'row' }, field(t('set_link_mode'), linkMode)), el('p', { class: 'muted', text: t('lm_note') }),
+        el('div', { class: 'row' }, el('label', {}, unitLeader, ' ', t('set_unit_leader'))))),
+      el('div', { class: 'row' }, saveBtn)];
   }
 
   // ---------------------------------------------------------------- role mappings
@@ -131,7 +281,8 @@
   ];
   const NEEDS_VALUE = ['minister_foreign', 'government_role', 'party_role'];
   async function rolesPage(g) {
-    const [m, rl, rk, st] = await Promise.all([api('GET', `/api/guilds/${g}/mappings`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/ranks`), api('GET', `/api/guilds/${g}/sync/status`)]);
+    const [m, rl, rk, st, cfg] = await Promise.all([api('GET', `/api/guilds/${g}/mappings`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/ranks`), api('GET', `/api/guilds/${g}/sync/status`), api('GET', `/api/guilds/${g}/settings`)]);
+    const allowed = cfg.ok ? new Set(cfg.data.settings.allowedKinds) : null;      // the server type decides which role kinds exist
     if (!m.ok) return [el('p', { class: 'err', text: errText(m) })];
     if (!rl.ok) return [el('p', { class: 'err', text: errText(rl) })];
     const roles = rl.data.roles; const names = new Map(roles.map((r) => [r.id, r.name]));
@@ -139,7 +290,7 @@
     const job = st.ok ? (st.data.lastSuccess || st.data.lastJob) : null; const seen = (job && job.details && job.details.seenRoles) || { party: {}, unit: {}, governmentUnknown: [] };
     const body = el('tbody', {}, m.data.mappings.map((x) => el('tr', {}, el('td', { text: t(`k_${x.kind}`) }), el('td', { text: x.gameRef || '—' }), el('td', { text: names.get(x.discordRoleId) || x.discordRoleId }),
       el('td', {}, el('button', { class: 'btn danger', type: 'button', text: t('remove'), onclick: async () => { const res = await api('DELETE', `/api/guilds/${g}/mappings/${x.id}`); if (res.ok) route(); else toast(errText(res), true); } })))));
-    const kind = el('select', { id: 'map-kind' }, KIND_GROUPS.map(([gl, ks]) => el('optgroup', { label: t(gl) }, ks.map((k) => el('option', { value: k, text: t(`k_${k}`) })))));
+    const kind = el('select', { id: 'map-kind' }, KIND_GROUPS.map(([gl, ks]) => [gl, allowed ? ks.filter((k) => allowed.has(k)) : ks]).filter(([, ks]) => ks.length).map(([gl, ks]) => el('optgroup', { label: t(gl) }, ks.map((k) => el('option', { value: k, text: t(`k_${k}`) })))));
     const ref = el('input', { class: 'wide', maxlength: 80, id: 'map-ref' }); const role = roleSelect(roles, '', false, rankRoles);
     const chips = el('div', { id: 'seen-values', class: 'row' });
     const refreshChips = () => {
@@ -367,7 +518,14 @@
     document.getElementById('who').textContent = j.user.username;
     const lo = document.getElementById('logout'); lo.hidden = false;
     lo.addEventListener('click', async () => { await api('POST', '/auth/logout', {}); location.assign('/'); });
-    window.addEventListener('hashchange', route); document.addEventListener('aon:lang', route);
+    window.addEventListener('hashchange', route);
+    document.addEventListener('aon:lang-before', () => { pendingSnap = captureState(); });
+    document.addEventListener('aon:lang', () => { const mt = document.getElementById('menu-toggle'); mt.setAttribute('aria-label', t(document.getElementById('sidebar').classList.contains('open') ? 'menu_close' : 'menu_open')); route(); });
+    const side = document.getElementById('sidebar'); const scrim = document.getElementById('scrim'); const mt = document.getElementById('menu-toggle');
+    mt.addEventListener('click', () => { const open = !side.classList.contains('open'); side.classList.toggle('open', open); scrim.classList.toggle('show', open); mt.setAttribute('aria-expanded', String(open)); mt.setAttribute('aria-label', t(open ? 'menu_close' : 'menu_open')); });
+    scrim.addEventListener('click', closeDrawer);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeDrawer(); document.querySelectorAll('.switcher .menu:not([hidden])').forEach((m) => { m.hidden = true; m.previousElementSibling?.setAttribute('aria-expanded', 'false'); }); } });
+    document.addEventListener('click', (e) => { if (!e.target.closest?.('.switcher')) document.querySelectorAll('.switcher .menu:not([hidden])').forEach((m) => { m.hidden = true; m.previousElementSibling?.setAttribute('aria-expanded', 'false'); }); });
     route();
   });
 })();
