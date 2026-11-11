@@ -1,3 +1,34 @@
+# CHANGELOG — Incident fix: `/app` stuck on the loading skeleton (hotfix, front-end only)
+
+**Base:** the uploaded `AoN-role-bot-main.zip` (it contains no `.git` metadata, so the exact commit could not be read from it; the files match Delivery 2 + Delivery 4 with Delivery 3's three front-end files missing). Extract over the project. **No migration, no new environment variable, no backend change, no files deleted.** Restart is not required (static files), but browsers may keep the old scripts for up to 5 minutes (`cache-control: max-age=300`) — hard-refresh once.
+
+## Root cause (confirmed in the repository, not yet confirmed on the live host)
+`packages/web/public/common.js`, `landing.html` and `landing.js` were still the **Delivery 2** versions, while `app.js`, `app.css`, `app.html` and `i18n.js` were the **Delivery 4** versions. Delivery 4 requires Delivery 3 ("Prerequisite" in its changelog), and Delivery 3's `common.js` is the file that defines `window.AON.icon` / `paintIcons` and the `aon:lang-before` event. Without it `app.js` runs `icon('server')` → `TypeError: icon is not a function` inside `route()`, which had no error handling, so the three-bar loading skeleton painted by `route()` was never replaced. The landing page keeps working because the Delivery 2 landing files are self-consistent. `/api/session` succeeds first, which is why the user is "logged in" yet sees nothing. The Discord bot is unaffected (separate code path).
+Evidence: `Object.keys(window.AON)` after loading the repo's `i18n.js` + `common.js` was `t,el,applyLang,setLang,getLang,toggleTheme,fmtNum,fmtDate` (no `icon`, no `paintIcons`); with the old `common.js` the repo's own tests "renders grouped sidebar navigation with icons…" and "landing page > has the two primary actions…" fail.
+
+## What changed
+- `common.js` restored/rewritten to the Delivery 3 contract: inline SVG icons (`createElementNS`, no markup strings; unknown names fall back to a dot), `paintIcons()`, `data-i18n-aria`, `aon:lang-before` / `aon:lang` events around a language switch, **no theme toggle** (single dark theme). `landing.html` / `landing.js` rebuilt for the Delivery 3/4 design using the dictionary keys and CSS that already ship (hero, features, three server types, steps, safety, FAQ, closing call to action; credit "Developed by AbuDujana" static English text). No alliance / ticket / proxy / nickname claims.
+- `app.js` hardening (so no future failure can look like "loading forever"): every API call has a 20 s timeout (`timeout` vs `network` distinguished); the session check is time-boxed; `route()` and page rendering catch exceptions; failures show a localized message with a **Retry** button; a malformed guild-list response is treated as an error. 401 still redirects to `/auth/login` — authentication, CSRF and guild isolation are untouched.
+- `i18n.js`: `e_network`, `e_timeout`, `e_server`, `retry` in Arabic and English (key parity kept).
+- New `packages/web/test/dashboard-resilience.test.ts` (11 tests).
+
+## Tests actually run (sandbox; fake Discord/game, in-memory PGlite database; **no real Postgres, no real browser, no production access**)
+- `@aon/web` `tsc --noEmit`: 0 errors.
+- `@aon/web` `ui.test.ts`: 72/72. `api.test.ts` + `auth.test.ts` + `setup.test.ts`: 97/97. New `dashboard-resilience.test.ts`: 11/11 (empty account, one server, 503 + Retry recovery, hanging API timeout, hanging session, network error, malformed body, AR/EN error text, script-contract regression).
+- Negative check: with the old `common.js` the two tests named above fail.
+- The default multi-file `vitest run` crashed the worker in this sandbox ("Worker exited unexpectedly" after 20 tests); the same files pass with `--pool=forks --poolOptions.forks.singleFork=true`. Treated as a sandbox limitation, not investigated.
+- **Not run:** other packages (untouched), real PostgreSQL, real Chromium, real Discord OAuth, the live site, Docker.
+
+## Not done / still to verify on the live host
+- Production commit, startup command, logs, OAuth redirect URI and environment variables could not be inspected (no access). See the report for the manual checks.
+- Phase 2 (regression audit, role-mapping lock, picker stale requests) and Phase 3 have **not** been started; they wait for confirmation that `/app` works in production.
+
+## Changed / new files
+Modified: `packages/web/public/common.js`, `landing.html`, `landing.js`, `app.js`, `i18n.js`, `CHANGELOG.md`
+New: `packages/web/test/dashboard-resilience.test.ts`
+
+---
+
 # CHANGELOG — Delivery 4: Phase 3 — type-driven setup, searchable selectors, country reservation
 
 **Prerequisite:** Delivery 3 (Phase 2) must already be applied: this ZIP contains full replacements of `app.css`, `app.html`, `app.js`, `i18n.js` and `ui.test.ts`, which build on Delivery 3.

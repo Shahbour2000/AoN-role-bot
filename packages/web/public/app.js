@@ -3,17 +3,22 @@
   const root = document.getElementById('root');
   const state = { csrf: '', user: null, guilds: null };
   let renderToken = 0;
+  const API_TIMEOUT_MS = 20000;
 
   // ---------------------------------------------------------------- plumbing
   async function api(method, path, body) {
     const opts = { method, credentials: 'same-origin', headers: {} };
     if (method !== 'GET' && method !== 'DELETE') { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body ?? {}); }
     if (method !== 'GET') opts.headers['x-csrf-token'] = state.csrf;
-    let res; try { res = await fetch(path, opts); } catch { return { ok: false, status: 0, data: { error: 'network' } }; }
-    let data = {}; try { data = await res.json(); } catch { /* no body */ }
+    const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), API_TIMEOUT_MS); opts.signal = ctl.signal;   // a request can never stay pending forever
+    let res; try { res = await fetch(path, opts); } catch { clearTimeout(timer); return { ok: false, status: 0, data: { error: ctl.signal.aborted ? 'timeout' : 'network' } }; }
+    let data = {}; try { data = await res.json(); } catch { if (ctl.signal.aborted) { clearTimeout(timer); return { ok: false, status: 0, data: { error: 'timeout' } }; } /* no body */ }
+    clearTimeout(timer);
     if (res.status === 401) { toast(t('session_expired'), true); setTimeout(() => location.assign('/'), 1200); }
     return { ok: res.ok, status: res.status, data };
   }
+  // Never leave the skeleton on screen: every failure ends in a localized message with a Retry button.
+  const failPanel = (msg, retry) => el('div', { class: 'callout warn', role: 'alert' }, el('p', { text: msg }), el('div', { class: 'row' }, el('button', { class: 'btn primary', type: 'button', id: 'retry', text: t('retry'), onclick: retry })));
   const errText = (r) => { const k = `e_${r.data?.error}`; const s = t(k); return s === k ? t('error_generic') : s; };
   function toast(msg, bad = false) {
     document.querySelectorAll('.toast').forEach((n) => n.remove());
@@ -74,14 +79,17 @@
     const token = ++renderToken; const r = parseRoute();
     closeDrawer(); loading();
     if (!r.guild) { renderNav(null); renderSwitcher(null); }
-    const view = r.guild ? await guildShell(r.guild, r.tab, token) : await guildList(token);
+    let view;
+    try { view = r.guild ? await guildShell(r.guild, r.tab, token) : await guildList(token); }
+    catch (e) { console.error('dashboard render failed', e); view = [failPanel(t('error_generic'), route)]; }
     if (token === renderToken && view) root.replaceChildren(...view);
   }
 
   // ---------------------------------------------------------------- guild list
   async function guildList() {
     const res = await api('GET', '/api/guilds');
-    if (!res.ok) return [el('p', { class: 'err', text: errText(res) })];
+    if (!res.ok) return [failPanel(errText(res), route)];
+    if (!Array.isArray(res.data.guilds)) return [failPanel(t('error_generic'), route)];
     const gs = res.data.guilds; state.guilds = gs;
     return [el('div', { class: 'page-head' }, el('h2', { text: t('pick_server') }), el('p', { text: t('pd_pick') })),
       gs.length ? el('div', { class: 'grid' }, gs.map((g) => el('div', { class: 'card' },
@@ -158,7 +166,7 @@
     renderNav(g, tab); renderSwitcher(g, tab);
     const content = el('div', { id: 'tab-content' });
     const head = el('div', { class: 'page-head' }, el('h2', {}, icon(tab), el('span', { text: t(`tab_${tab}`) })), el('p', { text: t(`pd_${tab}`) }));
-    queueMicrotask(async () => { if (token !== renderToken) return; const n = await PAGES[tab](g, content); if (token === renderToken && n) { content.replaceChildren(...n); paintIcons(content); restoreState(content, snap); } });
+    queueMicrotask(async () => { if (token !== renderToken) return; let n; try { n = await PAGES[tab](g, content); } catch (e) { console.error('page render failed', e); n = [failPanel(t('error_generic'), route)]; } if (token === renderToken && n) { content.replaceChildren(...n); paintIcons(content); restoreState(content, snap); } });
     content.replaceChildren(el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }));
     return [head, content];
   }
@@ -512,12 +520,16 @@
 
   // ---------------------------------------------------------------- boot
   document.addEventListener('DOMContentLoaded', async () => {
-    const me = await fetch('/api/session', { credentials: 'same-origin' });
-    if (!me.ok) { location.assign('/auth/login'); return; }
-    const j = await me.json(); state.user = j.user; state.csrf = j.csrfToken;
+    let me, j;
+    try { me = await fetch('/api/session', { credentials: 'same-origin', signal: AbortSignal.timeout(API_TIMEOUT_MS) }); if (me.ok) j = await me.json(); }
+    catch { root.replaceChildren(failPanel(t('e_network'), () => location.reload())); return; }
+    if (me.status === 401) { location.assign('/auth/login'); return; }
+    if (!me.ok || !j || !j.user) { root.replaceChildren(failPanel(t(me.status >= 500 ? 'e_server' : 'error_generic'), () => location.reload())); return; }
+    state.user = j.user; state.csrf = j.csrfToken;
     document.getElementById('who').textContent = j.user.username;
     const lo = document.getElementById('logout'); lo.hidden = false;
     lo.addEventListener('click', async () => { await api('POST', '/auth/logout', {}); location.assign('/'); });
+    paintIcons();
     window.addEventListener('hashchange', route);
     document.addEventListener('aon:lang-before', () => { pendingSnap = captureState(); });
     document.addEventListener('aon:lang', () => { const mt = document.getElementById('menu-toggle'); mt.setAttribute('aria-label', t(document.getElementById('sidebar').classList.contains('open') ? 'menu_close' : 'menu_open')); route(); });
