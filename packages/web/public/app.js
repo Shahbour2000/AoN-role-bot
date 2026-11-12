@@ -98,9 +98,9 @@
   }
 
   // ---------------------------------------------------------------- guild shell (sidebar nav, server switcher, page header)
-  const TABS = ['overview', 'setup', 'roles', 'builds', 'ranks', 'players', 'sync', 'audit', 'diag'];
-  const PAGES = { overview, setup, roles: rolesPage, builds: buildsPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
-  const NAV_GROUPS = [['nav_general', ['overview', 'setup']], ['nav_roles', ['roles', 'builds', 'ranks']], ['nav_community', ['players']], ['nav_ops', ['sync', 'audit', 'diag']]];
+  const TABS = ['overview', 'setup', 'verify', 'roles', 'builds', 'ranks', 'players', 'sync', 'audit', 'diag'];
+  const PAGES = { overview, setup, verify: verifyPage, roles: rolesPage, builds: buildsPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
+  const NAV_GROUPS = [['nav_general', ['overview', 'setup', 'verify']], ['nav_roles', ['roles', 'builds', 'ranks']], ['nav_community', ['players']], ['nav_ops', ['sync', 'audit', 'diag']]];
   const guildName = (g) => (state.guilds || []).find((x) => x.id === g)?.name || t('sw_unknown');
 
   function closeDrawer() {
@@ -507,6 +507,34 @@
     }
     more.addEventListener('click', load); await load();
     return [el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, [t('au_when'), t('au_actor'), t('au_action'), t('au_target')].map((h) => el('th', { text: h })))), tbody)), el('div', { class: 'row' }, more)];
+  }
+
+
+  // ---------------------------------------------------------------- verification tickets
+  async function verifyPage(g) {
+    const [st, ch] = await Promise.all([api('GET', `/api/guilds/${g}/verification`), api('GET', `/api/guilds/${g}/channels`)]);
+    if (!st.ok) return [failPanel(errText(st), route)];
+    const d = st.data; const n = (k) => fmtNum(d.last30d[k] ?? 0);
+    const kpi = (ic, label, value) => el('div', { class: 'card stat' }, el('h3', {}, icon(ic), ' ', label), el('p', { text: value }));
+    const sel = el('select', { id: 'vf-channel' }, el('option', { value: '', text: t('vf_channel_none') }),
+      ch.ok ? ch.data.channels.map((c) => el('option', { value: c.id, text: `# ${c.name}`, ...(c.id === d.channelId ? { selected: true } : {}) })) : []);
+    if (d.channelId && ch.ok && !ch.data.channels.some((c) => c.id === d.channelId)) sel.append(el('option', { value: d.channelId, text: d.channelId, selected: true }));
+    const save = el('button', { class: 'btn primary', type: 'button', id: 'vf-save', text: t('save'), onclick: async () => {
+      save.disabled = true;
+      const r = await api('PUT', `/api/guilds/${g}/settings`, { verificationChannelId: sel.value || null });
+      save.disabled = false; toast(r.ok ? t('vf_saved') : r.data?.error === 'invalid_channel' ? t('vf_invalid_channel') : errText(r), !r.ok);
+    } });
+    const legacy = d.linkedMembers.byMethod.legacy_unverified ?? 0;
+    const rows = d.recent.map((a) => el('tr', {}, el('td', { text: fmtDate(a.createdAt) }), el('td', { text: a.discordUserId }), el('td', { text: a.playerUsername || a.playerId }),
+      el('td', {}, badge(t(`vf_s_${a.status}`), a.status === 'verified' ? 'ok' : a.status === 'pending' ? '' : 'bad')), el('td', { text: fmtNum(a.checkCount) }), el('td', { text: a.lastResult ? t(`vf_r_${a.lastResult}`) : '' })));
+    return [
+      el('div', { class: 'stats' }, kpi('check', t('vf_verified'), n('verified')), kpi('clock', t('vf_pending'), n('pending')), kpi('close', t('vf_failed'), fmtNum((d.last30d.expired ?? 0) + (d.last30d.cancelled ?? 0) + (d.last30d.locked ?? 0))), kpi('link', t('vf_linked'), fmtNum(d.linkedMembers.total))),
+      el('div', { class: 'card' }, el('h3', { text: t('vf_channel') }), el('p', { class: 'muted', text: t('vf_channel_hint') }),
+        ch.ok ? field(t('vf_channel'), sel) : el('p', { class: 'err', text: t('vf_channels_unavailable') }), el('div', { class: 'row' }, ch.ok ? save : [])),
+      legacy ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('vf_legacy_note', { n: fmtNum(legacy) }) })) : null,
+      el('h3', { text: t('vf_recent') }),
+      rows.length ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, [t('au_when'), t('vf_col_member'), t('vf_col_player'), t('vf_col_status'), t('vf_col_checks'), t('vf_col_result')].map((h) => el('th', { text: h })))), el('tbody', {}, rows))) : el('p', { class: 'muted', text: t('vf_none') }),
+    ];
   }
 
   // ---------------------------------------------------------------- diagnostics

@@ -1,53 +1,84 @@
-# PROJECT_STATUS  (updated 2026-10-22)
+# AoN Role Bot — project status
 
-## Test status — every number below comes from a run in this session
-| Package | Tests | PGlite (in-process PostgreSQL) | Real PostgreSQL 16.15 |
-|---|---|---|---|
-| @aon/core | 59 | ✔ | n/a (pure logic) |
-| @aon/client | 49 | ✔ | n/a (fake fetch/clock) |
-| @aon/db | 67 | ✔ | ✔ |
-| @aon/sync | 81 | ✔ | ✔ |
-| @aon/bot | 77 | ✔ | ✔ |
-| @aon/web (auth 23, API 43, UI via jsdom 36) | 102 | ✔ | ✔ |
-| **Total** | **435** | **435** | **327** |
-- `tsc --strict`: 0 errors in every package. This is the project's "lint"; there is no bundler/build step (TypeScript runs through `tsx`).
-- Smoke: `packages/bot/src/main.ts` on a fresh real PostgreSQL applies migrations 0001–0006 and stops at Discord login (`ENOTFOUND discord.com`: the sandbox has no route to Discord). Invalid configuration fails fast without echoing secrets.
-- The per-member lock was **mutation-tested**: with it disabled, the overlap test fails (member ends with two rank roles); with it, one.
-- Upgrade path tested: a database at the previous schema (0001–0004) with guilds on odd intervals upgrades through 0005–0006 keeping data.
+Updated for **Phase 1 (global linking + company-verification tickets)**. Base: the repository as uploaded after the dashboard hotfix
+(no `.git` metadata in the upload, so no commit hash can be stated). Statuses: **COMPLETE** implemented and verified · **PARTIAL** implemented but
+incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evidence") · **BLOCKED** genuine external limitation · **NOT STARTED**.
 
-## Implemented (this stage, on top of the earlier work)
-- **Community types** (docs/COMMUNITY_TYPES.md): country (president, VP, defense, economy, congress, citizens, plus foreign minister and other offices via the game's own role value), party (leader, member, any other party role via the game's role value), military unit (member, leader; optional "leader replaces member"). Roles are independent; a player may hold several. Alliance: **not available** (no verified data) and refused by the API/dashboard.
-- **Military ranks**: optional per server (off by default); owner's **17** starter ranks; add / rename / re-threshold / reorder / disable / delete from the dashboard; exclusive group; validation in dashboard + backend + database (strictly increasing thresholds, one Discord role per rank, a role cannot be both a rank role and a mapped role, sensitive roles refused); deletion refused during a running sync; deleted ranks' roles cleaned from members by the next complete clean sync; per-member lock so overlapping syncs cannot leave two rank roles; failures never remove a rank.
-- **Linking**: `/link username:<name>` (direct by default, staff-approval optional per server), `/unlink`, `/link-status`; Discord user ID as identity, stable player ID stored; conflicts refused with guidance; API failures never delete links; pluggable `OwnershipVerifier` for a future stronger check. **Ownership is not proven** (documented in README, docs/LINKING.md, bot replies and dashboard).
-- **`/profile`**: designed Discord embed (avatar, country, level/XP, all-time + recent damage, offices, party, unit, work/trade/companies, rank + progress when the server enabled ranks), Arabic/English, only real data, Discord limits enforced and tested, escaping of game-supplied text.
-- **Dashboard**: setup (community-type presets, link mode, unit-leader option, alliance shown as unavailable), mappings grouped by community type with the role values the game reported, rank editor (optional switch, defaults creation, reorder keeping thresholds in place, delete warning), players (link method badge), schedule/sync status, audit, diagnostics. Nothing is offered that has no backend.
-- **Earlier work kept intact**: durable 3/6/12/24 h scheduler, bidirectional reconciliation, OAuth2 dashboard, migrations, logo integration.
-- Migration `0006_linking_party_roles_unit_options.sql` (forward-only; existing guilds keep their values, only defaults for new guilds change).
+**Evidence levels used below:** *mock* = fakes for Discord / game API · *PGlite* = in-process PostgreSQL · *PG16* = real PostgreSQL 16 server ·
+*jsdom* = simulated browser. **Nothing has been verified against real Discord, the live game API, a real browser, or the production host.**
 
-## Decisions where the owner's messages differed (please confirm)
-- **Default rank list**: the earlier handoff had 18 ranks (including "جندي أول" at 25,000); the latest message lists **17** (without it). The **latest (17)** is implemented. Existing guilds' stored ladders are not rewritten.
-- **Default demotion policy** for new servers is **immediate** (was "never"): thresholds are configurable and damage only grows, so reflecting a threshold change at the next sync requires it. "Never" and "grace period" remain selectable. A failed/malformed damage value never triggers a demotion under any policy.
-- **Default link mode** for new servers is **direct** (as requested); staff approval stays available per server.
+## Phase 0 — production stability
+| Item | Status | Evidence / notes |
+|---|---|---|
+| Dashboard loading hotfix integrated | COMPLETE (code) | Files byte-identical to the delivered hotfix; resilience tests (13) pass on jsdom. Live `/app` not re-checked by me (no access). |
+| Dashboard never stays on the loading skeleton | COMPLETE | timeouts + Retry panels, tested (jsdom) |
+| Hosting config (SERVER_PORT/PORT, 0.0.0.0, health) | UNVERIFIED | code reviewed, never run on the host from here |
+| Deploy from Git (no hand-unzipping) | n/a | process recommendation |
 
-## Deferred (and why)
-- Alliance roles (member + the player's country inside the alliance): **no verified API data** (`/alliances` never sampled). Needs one real response of `GET /alliances` and `GET /alliances/{id}` showing member/leader fields, and a player↔alliance relation.
-- Stronger ownership verification and verification tickets: explicitly deferred; the extension point exists.
-- Unit **owner** role: not needed (a single leader role was requested).
-- Cumulative rank mode: not requested (ranks are exclusive).
+## Phase 1 — global linking and verification tickets (this delivery)
+| Item | Status | Evidence / notes |
+|---|---|---|
+| Global Discord↔AoN uniqueness enforced by the database | UNVERIFIED | `global_links` partial unique indexes + guard trigger on `account_links`; PGlite + PG16 tests incl. races. Not deployed. |
+| Existing links preserved by migration 0009 | UNVERIFIED | tested on PGlite/PG16 with conflicting legacy data; **not run on your production data** |
+| All servers use the same identity; no second verification | UNVERIFIED | mock Discord tests; materialised on first explicit use (no member-join intent) |
+| Company-name verification (code in own company name) | UNVERIFIED | full flow tested with mocks. **Companies response shape never sampled** (docs/VERIFICATION.md) |
+| Codes: random, hashed, 30 min, one-time, bound to attempt/user | COMPLETE (code) | core + DB tests |
+| Retry limits, spacing, daily cap, owner-only buttons, no manual proof | COMPLETE (code) | DB + bot tests |
+| API down / expired / wrong code / incomplete data / already linked handled | UNVERIFIED | mock tests |
+| Ticket UI (open, instructions + code, check, new code, close, panel, modal) AR/EN | UNVERIFIED | mock tests; discord.js adapters (`interactions.ts`, `main.ts`) **never run against real Discord** |
+| Dashboard: ticket channel setting + statistics + attempt history | UNVERIFIED | API tests (PGlite) + jsdom UI tests |
+| Admin review of exceptional cases | PARTIAL | history table, `/force link` (never overrides a proven link), `/admin unlink` (server-level), operator script `scripts/recover-link.ts`. No interactive review queue. |
+| Audit trail for attempts and admin actions | COMPLETE (code) | `verification.*`, `link.*` events |
+| Staff-visible ticket threads | NOT STARTED | decision: ephemeral tickets (docs/VERIFICATION.md) |
+| Linking on member join (privileged intent) | NOT STARTED | needs `GuildMembers` intent — your decision |
 
-## Data still missing (exact evidence that would unlock more)
-- The game's raw role value for **Foreign Affairs minister** (needed to map it automatically; today the admin enters it, the dashboard lists values seen in syncs).
-- The game's party **role values** for treasurer and council members (today: admin maps "Other party role" with the value seen in a sync; only `leader` and `commander` were observed).
-- Whether `avatarUrl` (`/media/...`) is served from `https://app.ageofnations.world` (configurable `AON_MEDIA_BASE_URL`; a wrong guess only means no thumbnail).
-- Profile of a player with no party/unit: `null` vs absent key (code treats explicit `null` as not-a-member, absent as unknown).
-- Country display names for the card (only the country **ID** is shown; `/countries` response not sampled).
+## Phase 2 — proxy countries and country-server identification roles
+| Item | Status | Notes |
+|---|---|---|
+| Proxy Countries section (add/remove, country picker from API list, proxy-citizen role) | NOT STARTED | rule now defined (proxy country belongs to Egypt; citizens keep Egyptian server access; Proxy Citizen role) |
+| Proxy removal reconciliation | NOT STARTED | design needed: never delete unrelated roles |
+| Country server: Party Member / Party President (any party of the server's country) | NOT STARTED | today's `party_member`/`party_leader` are bound to ONE party. Needs party→country index from `/countries/{c}/parties` |
+| Country server: Unit Member (ANY unit, any country) / Unit Leader / Unit Owner (units of the server's country only) | NOT STARTED | needs `/countries/{c}/units` (`countryId`, `ownerId`); no `unit_owner` kind exists |
+| Discord role selector with real colours | NOT STARTED | `/roles` API returns `color`; UI is a plain `<select>` |
+| Party/unit selectors with logos, country-filtered | PARTIAL | searchable pickers exist; **no verified logo field** → initials fallback to be built |
 
-## Not verified / known limits
-- **Never run against real Discord or the live game API** (sandbox limitation): bot login, slash-command registration, OAuth round-trip, role changes, `/profile` rendering inside Discord and the discord.js adapter are tested only against fakes and Discord's documented limits.
-- The dashboard was exercised with jsdom against the real backend, **not in a real browser**; visual layout/responsiveness is unreviewed.
-- `/sync all` costs ≈1 game request per member for damage (60 requests/min per IP shared): ≈11 min for 500 members with ranks on.
-- Command descriptions are English only (Arabic is not a Discord command-localisation locale); all replies follow the server language.
-- Dockerfile exists but is **untested** (no Docker in the sandbox). No hosting/deployment work was done (as requested).
+## Phase 3 — setup and configuration
+| Item | Status | Notes |
+|---|---|---|
+| Server-type-driven setup | UNVERIFIED | works; known race (below) |
+| Searchable country/party/unit selectors | PARTIAL | exist; country list shape unsampled (manual-id fallback) |
+| Country reservation (migration 0008) | COMPLETE | DB-enforced, PG16 tests re-run this session |
+| Role-mapping concurrency (`addRoleMapping` must use the guild lock) | NOT STARTED | known issue A |
+| Entity-picker stale-response protection | NOT STARTED / UNVERIFIED | known issue B, no tests |
+| Mapping validation / conflict prevention | PARTIAL | kind/type rules and role exclusivity exist |
 
-## After you receive the files (not done yet, by design)
-Create the Discord application, set `.env` from `.env.example`, run on a machine that can reach Discord, upload `brand/bot-avatar-1024.png`.
+## Phase 4 — bot administrators and synchronisation
+| Item | Status | Notes |
+|---|---|---|
+| Trusted bot-administrator roles (bot + dashboard) | NOT STARTED | |
+| Nickname synchronisation | NOT STARTED | needs Manage Nicknames + hierarchy rules |
+| Role reconciliation, manual (`/sync`) and scheduled sync, history | UNVERIFIED | durable scheduler + tests (mock/PGlite/PG16); never run on real Discord |
+| War / Economy / Hybrid build roles | PARTIAL / BLOCKED | code + migration 0007 exist; the real profile sample has no `skills`, formula provisional |
+| Military rank roles | UNVERIFIED | strong tests, never on real Discord |
+| Government office roles | UNVERIFIED | foreign-minister raw value unknown |
+| Party-specific roles (leader, member, Treasurer, Council) | PARTIAL | Treasurer/Council need the game's role value (admin enters it) |
+| Unit-specific roles (Member, Leader, **Owner**) | PARTIAL | Owner kind missing |
+
+## Phase 5 — dashboard and management
+| Item | Status | Notes |
+|---|---|---|
+| Players management | PARTIAL | list, approve, force, unlink |
+| Audit log UI | UNVERIFIED | |
+| Diagnostics | PARTIAL | basic |
+| Profile card improvements / designer / per-player messages | PARTIAL / NOT STARTED / NOT STARTED | embed exists; flag blocked; designer and messages not started |
+
+## Phase 6 — polish, security, deployment
+| Item | Status | Notes |
+|---|---|---|
+| Arabic + English | PARTIAL | key parity tested for bot and dashboard; wording review by a native reader pending |
+| Responsive RTL | UNVERIFIED | jsdom only, no real browser/screenshots |
+| Multi-server isolation, server-side authorisation, CSRF | COMPLETE (sandbox) | API/auth tests incl. new routes; never pen-tested |
+| Dockerfile / deployment | UNVERIFIED | never built |
+
+## Test results of this delivery
+See CHANGELOG.md ("Tests actually run").

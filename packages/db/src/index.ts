@@ -6,3 +6,5 @@ export * from './links-repo.js';
 export * from './guild-repo.js';
 export * from './pg.js';
 export * from './sessions-repo.js';
+export * from './global-links-repo.js';
+export * from './verification-repo.js';

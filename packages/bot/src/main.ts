@@ -9,8 +9,8 @@ import { purgeExpiredSessions } from '@aon/db';
 import { buildCommands } from './commands.js';
 import { loadConfig } from './config.js';
 import { DiscordJsGateway } from './discord-gateway.js';
-import { handleButton, handleCommand, onGuildInstalled, type BotDeps } from './handlers.js';
-import { toButtonInvocation, toInvocation } from './interactions.js';
+import { handleButton, handleCommand, handleModal, onGuildInstalled, type BotDeps } from './handlers.js';
+import { components, toButtonInvocation, toInvocation, toModalInvocation } from './interactions.js';
 import { startScheduler } from './scheduler.js';
 
 const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
@@ -26,13 +26,20 @@ async function main() {
   const game = new AonClient({ baseUrl: cfg.apiBaseUrl });
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });   // no privileged intents required
   const discord = new DiscordJsGateway(client);
-  const deps: BotDeps = { db, game, discord, httpStats: () => ({ ...game.http.stats }), log, ...(cfg.mediaBaseUrl ? { mediaBaseUrl: cfg.mediaBaseUrl } : {}) };
+  const deps: BotDeps = { db, game, discord,
+    postPanel: async (guildId, channelId, r) => {
+      const ch = await client.channels.fetch(channelId);
+      if (!ch || ch.isDMBased() || !ch.isTextBased() || !('guildId' in ch) || ch.guildId !== guildId) throw new Error('channel is not in this server');   // never post into another server's channel
+      await ch.send({ content: r.content, components: components(r), allowedMentions: { parse: [] } });
+    },
+    httpStats: () => ({ ...game.http.stats }), log, ...(cfg.mediaBaseUrl ? { mediaBaseUrl: cfg.mediaBaseUrl } : {}) };
 
   client.on(Events.GuildCreate, (g) => { onGuildInstalled(db, g.id, g.name).catch((e) => log(`guildCreate failed: ${e instanceof Error ? e.message : e}`)); });
   client.on(Events.InteractionCreate, async (i) => {
     try {
       if (i.isChatInputCommand()) await handleCommand(deps, toInvocation(i));
       else if (i.isButton()) await handleButton(deps, toButtonInvocation(i));
+      else if (i.isModalSubmit()) await handleModal(deps, toModalInvocation(i));
     } catch (e) {
       log(`interaction error: ${e instanceof Error ? e.message : 'unknown'}`);                 // details stay in logs, not in chat
       if (i.isRepliable()) await (i.deferred || i.replied ? i.editReply({ content: 'Something went wrong. Nothing was changed.' }) : i.reply({ content: 'Something went wrong. Nothing was changed.', ephemeral: true })).catch(() => undefined);

@@ -18,6 +18,8 @@ export interface GuildConfig {
   demotion: DemotionPolicy;
   requireStaffApproval: boolean; linkMode: 'direct' | 'staff_approval'; unitLeaderReplacesMember: boolean;
   autoSyncEnabled: boolean; syncIntervalMinutes: number; nextSyncAt: Date | null;
+  /** Channel where the verification-ticket panel is posted (null = not configured; `/verify` still works anywhere). */
+  verificationChannelId: string | null;
 }
 export interface RoleMapping { id: string; guildId: string; kind: RoleKind; gameRef: string; discordRoleId: string }
 
@@ -26,7 +28,7 @@ interface GuildRow {
   country_id: string | null; party_id: string | null; unit_id: string | null; alliance_id: string | null;
   modules: GuildConfig['modules']; require_staff_approval: boolean; demotion_mode: 'never' | 'immediate' | 'grace';
   demotion_grace_days: number; sync_interval_minutes: number; auto_sync_enabled: boolean; next_sync_at: Date | null;
-  unit_leader_replaces_member: boolean;
+  unit_leader_replaces_member: boolean; verification_channel_id: string | null;
 }
 
 export async function ensureGuild(db: Db, guildId: string, name: string): Promise<void> {
@@ -40,7 +42,7 @@ export async function getGuildConfig(db: Db, guildId: string): Promise<GuildConf
   return {
     guildId: g.guild_id, name: g.name, communityType: g.community_type, language: g.language,
     countryId: g.country_id, partyId: g.party_id, unitId: g.unit_id, allianceId: g.alliance_id,
-    modules: g.modules, requireStaffApproval: g.require_staff_approval, linkMode: g.require_staff_approval ? 'staff_approval' : 'direct', unitLeaderReplacesMember: g.unit_leader_replaces_member, autoSyncEnabled: g.auto_sync_enabled, syncIntervalMinutes: g.sync_interval_minutes, nextSyncAt: g.next_sync_at,
+    modules: g.modules, requireStaffApproval: g.require_staff_approval, linkMode: g.require_staff_approval ? 'staff_approval' : 'direct', unitLeaderReplacesMember: g.unit_leader_replaces_member, autoSyncEnabled: g.auto_sync_enabled, syncIntervalMinutes: g.sync_interval_minutes, nextSyncAt: g.next_sync_at, verificationChannelId: g.verification_channel_id,
     demotion: g.demotion_mode === 'grace' ? { mode: 'grace', graceDays: g.demotion_grace_days } : { mode: g.demotion_mode },
   };
 }
@@ -117,8 +119,8 @@ const MIN_RESCHEDULE_DELAY_MS = 5 * 60_000;
  *    max(last scheduled run + interval, now + 5 min)  (never a burst of immediate runs, never a lost schedule);
  *  - any other change leaves next_sync_at untouched.
  */
-export async function updateGuildSettings(db: Db, guildId: string, patch: Partial<Pick<GuildRow, 'country_id' | 'party_id' | 'unit_id' | 'alliance_id' | 'language' | 'community_type' | 'demotion_mode' | 'demotion_grace_days' | 'auto_sync_enabled' | 'sync_interval_minutes' | 'require_staff_approval' | 'unit_leader_replaces_member'>> & { modules?: GuildConfig['modules'] }, actor: string | null, now: Date = new Date(), opts: { confirmRemoveIncompatible?: boolean } = {}): Promise<{ removedMappings: IncompatibleMapping[] }> {
-  const allowed = ['country_id', 'party_id', 'unit_id', 'alliance_id', 'language', 'community_type', 'demotion_mode', 'demotion_grace_days', 'auto_sync_enabled', 'sync_interval_minutes', 'require_staff_approval', 'unit_leader_replaces_member', 'modules'] as const; // whitelist: never interpolate caller keys
+export async function updateGuildSettings(db: Db, guildId: string, patch: Partial<Pick<GuildRow, 'country_id' | 'party_id' | 'unit_id' | 'alliance_id' | 'language' | 'community_type' | 'demotion_mode' | 'demotion_grace_days' | 'auto_sync_enabled' | 'sync_interval_minutes' | 'require_staff_approval' | 'unit_leader_replaces_member' | 'verification_channel_id'>> & { modules?: GuildConfig['modules'] }, actor: string | null, now: Date = new Date(), opts: { confirmRemoveIncompatible?: boolean } = {}): Promise<{ removedMappings: IncompatibleMapping[] }> {
+  const allowed = ['country_id', 'party_id', 'unit_id', 'alliance_id', 'language', 'community_type', 'demotion_mode', 'demotion_grace_days', 'auto_sync_enabled', 'sync_interval_minutes', 'require_staff_approval', 'unit_leader_replaces_member', 'verification_channel_id', 'modules'] as const; // whitelist: never interpolate caller keys
   const sets: string[] = []; const vals: unknown[] = [guildId];
   for (const k of allowed) if (k in patch) { vals.push(k === 'modules' ? JSON.stringify(patch[k]) : patch[k]); sets.push(`${k}=$${vals.length}${k === 'modules' ? '::jsonb' : ''}`); }
   if (!sets.length) return { removedMappings: [] };

@@ -2,6 +2,7 @@ import type { Fetched } from '@aon/core';
 import type { PlayerIdentity, ProfileCard, StatsCard } from '@aon/client';
 import { updateGuildSettings } from '@aon/db';
 import { setup, FakeGame, FakeDiscord, rosterOf, ROLE } from '../../sync/test/harness.js';
+import { handleButton, handleCommand } from '../src/index.js';
 import type { BotDeps, ButtonInvocation, Invocation, Reply } from '../src/index.js';
 export { rosterOf, ROLE };
 
@@ -10,6 +11,9 @@ export class BotGame extends FakeGame {
   cards = new Map<string, { profile: Fetched<ProfileCard>; stats: Fetched<StatsCard> }>();
   cardRequests = 0;
   countryNames = new Map<string, string>([['eg', 'Egypt']]);
+  companies = new Map<string, Fetched<{ companies: { id: string | null; name: string }[] }>>();
+  companyCalls = 0;
+  async playerCompanies(id: string) { this.companyCalls++; return this.companies.get(id) ?? ({ status: 'ok', data: { companies: [] } } as const); }
   async countryName(id: string) { return this.countryNames.get(id) ?? null; }
   async playerCard(id: string) { this.cardRequests++; return this.cards.get(id) ?? { profile: { status: 'not_found' as const }, stats: { status: 'not_found' as const } }; }
   async playerByName(u: string) { return this.names.get(u.toLowerCase()) ?? ({ status: 'not_found' } as const); }
@@ -40,3 +44,15 @@ export function click(customId: string, o: { userId?: string; admin?: boolean; g
   return { b, last: () => updates[updates.length - 1]! };
 }
 export const player = (id: string, username: string): Fetched<PlayerIdentity> => ({ status: 'ok', data: { id, username } });
+
+/** Runs the REAL ticket flow: /verify -> (member renames a company) -> Check. Returns the code and the final message. */
+export async function verifyViaTicket(h: { deps: BotDeps; game: BotGame }, o: { playerId: string; username: string; userId?: string; guildId?: string }) {
+  const userId = o.userId ?? 'u1'; const guildId = o.guildId ?? 'A';
+  h.game.names.set(o.username.toLowerCase(), player(o.playerId, o.username));
+  const c = inv({ group: 'verify', userId, guildId, str: { username: o.username } }); await handleCommand(h.deps, c.i);
+  const code = /`(AON-[A-Z0-9]{10})`/.exec(c.last().content)?.[1];
+  if (!code) throw new Error(`no code in: ${c.last().content}`);
+  h.game.companies.set(o.playerId, { status: 'ok', data: { companies: [{ id: 'c1', name: `Acme ${code}` }] } });
+  const k = click(c.last().buttons![0]!.id, { userId, guildId }); await handleButton(h.deps, k.b);
+  return { code, result: k.last(), ticket: c.last() };
+}

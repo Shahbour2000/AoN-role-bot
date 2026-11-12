@@ -1,5 +1,6 @@
 import { audit } from './audit.js';
 import type { Db } from './db.js';
+import { isProof, unlinkGlobalTx, type GlobalMethod, type GlobalUnlinkResult } from './global-links-repo.js';
 
 export type LinkStatus = 'pending' | 'verified' | 'admin_linked' | 'rejected' | 'unlinked';
 export interface LinkRow { id: string; guild_id: string; discord_user_id: string; player_id: string; status: LinkStatus; conflict: boolean; method: string }
@@ -81,11 +82,21 @@ export async function reviewLink(db: Db, a: { guildId: string; linkId: string; r
   });
 }
 
-export type ForceResult = { ok: true; replaced: string[] } | { ok: false; code: 'CONFLICT_REQUIRES_REPLACE' };
+export type ForceResult = { ok: true; replaced: string[]; /** other servers' links ended by `replace` (the caller strips their roles) */ displaced: GlobalUnlinkResult[] } | { ok: false; code: 'CONFLICT_REQUIRES_REPLACE' | 'GLOBAL_CONFLICT' };
 
 /** /force link. By default refuses to displace an existing active link; `replace` unlinks them (audited, reversible via audit). */
 export async function forceLink(db: Db, a: { guildId: string; adminId: string; discordUserId: string; playerId: string; username: string | null; reason?: string; replace?: boolean }): Promise<ForceResult> {
   return db.tx(async (t) => {
+    // Global identity first: a server administrator can never break a PROVEN (company-verified) link that other servers rely on.
+    const globals = (await t.query<{ discord_user_id: string; player_id: string; method: GlobalMethod }>(`SELECT discord_user_id, player_id, method FROM global_links WHERE status='active' AND (player_id=$1 OR discord_user_id=$2) FOR UPDATE`, [a.playerId, a.discordUserId])).rows;
+    const clashing = globals.filter((g) => !(g.discord_user_id === a.discordUserId && g.player_id === a.playerId));
+    if (clashing.some((g) => isProof(g.method))) return { ok: false, code: 'GLOBAL_CONFLICT' } as const;
+    if (clashing.length && !a.replace) return { ok: false, code: 'CONFLICT_REQUIRES_REPLACE' } as const;
+    const displaced: GlobalUnlinkResult[] = [];
+    for (const g of clashing) {
+      const r = await unlinkGlobalTx(t, { by: { playerId: g.player_id }, actorId: a.adminId, action: 'link.unlinked_by_replace', reason: a.reason ?? 'replaced by admin link', auditGuildId: a.guildId });
+      if (r) displaced.push(r);
+    }
     const { rows: existing } = await t.query<LinkRow>(`SELECT * FROM account_links WHERE guild_id=$1 AND status IN ('verified','admin_linked') AND (player_id=$2 OR discord_user_id=$3) FOR UPDATE`, [a.guildId, a.playerId, a.discordUserId]);
     if (existing.length && !a.replace) return { ok: false, code: 'CONFLICT_REQUIRES_REPLACE' } as const;
     for (const e of existing) {
@@ -96,7 +107,7 @@ export async function forceLink(db: Db, a: { guildId: string; adminId: string; d
     await t.query(`INSERT INTO account_links (guild_id, discord_user_id, player_id, player_username, status, method, reviewed_by, reviewed_at, reason)
                    VALUES ($1,$2,$3,$4,'admin_linked','admin_forced',$5,now(),$6)`, [a.guildId, a.discordUserId, a.playerId, a.username, a.adminId, a.reason ?? null]);
     await audit(t, { guildId: a.guildId, actor: a.adminId, action: 'link.admin_linked', target: a.playerId, details: { discordUserId: a.discordUserId, reason: a.reason ?? null, replaced: existing.length } });
-    return { ok: true, replaced: existing.map((e) => e.player_id) } as const;
+    return { ok: true, replaced: [...new Set([...displaced.map((d) => d.playerId), ...existing.map((e) => e.player_id)])], displaced } as const;
   });
 }
 

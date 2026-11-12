@@ -4,35 +4,12 @@ import { extractProfileCard, extractStatsCard } from '@aon/client';
 import { claimLink, findLinkForUser, forceLink, listLinks, saveLadder, updateGuildSettings } from '@aon/db';
 import { profileAbuDujana, statsAbuDujana } from '../../aon-client/test/fixtures.js';
 import { handleButton, handleCommand, validateEmbed } from '../src/index.js';
-import { ROLE, botSetup, click, inv, player, rosterOf } from './bot-harness.js';
+import { ROLE, botSetup, click, inv, player, rosterOf, verifyViaTicket } from './bot-harness.js';
 import { addRoleMapping } from '@aon/db';
 
 const confirmId = (r: { buttons?: { id: string }[] }) => r.buttons!.find((b) => b.id.startsWith('lc:') || b.id.startsWith('fl:'))!.id;
 
 describe('/link — direct mode (the default for new servers)', () => {
-  it('previews the resolved player; only Confirm links, immediately, and the roles are refreshed at once', async () => {
-    const h = await botSetup(); h.game.names.set('alpha', player('p1', 'Alpha'));
-    await addRoleMapping(h.db, { guildId: 'A', kind: 'president', discordRoleId: ROLE.pres, actor: null });
-    h.discord.give('A', 'u1'); h.game.roster = rosterOf('eg', [{ userId: 'p1', role: 'president' }, { userId: 'p9', role: 'congress' }]);
-    const c = inv({ str: { username: 'Alpha' } });
-    await handleCommand(h.deps, c.i);
-    expect(c.last().content).toContain('Alpha'); expect(c.last().content).toContain('p1');
-    expect(await findLinkForUser(h.db, 'A', 'u1')).toBeNull();                         // nothing stored before confirmation
-    const k = click(confirmId(c.last())); await handleButton(h.deps, k.b);
-    expect(await findLinkForUser(h.db, 'A', 'u1')).toMatchObject({ playerId: 'p1', status: 'verified' });
-    expect(k.last().content).toContain('does not prove');                              // the limitation is stated to the user
-    expect(k.last().content).toContain(ROLE.pres);                                      // role granted right after linking
-    expect(h.discord.has('A', 'u1').has(ROLE.pres)).toBe(true);
-    expect((await listLinks(h.db, 'A', 'verified'))[0]).toMatchObject({ method: 'self_direct', discord_user_id: 'u1' });   // Discord user ID is the identity
-  });
-  it('someone else cannot press my confirm button; cancel stores nothing', async () => {
-    const h = await botSetup(); h.game.names.set('alpha', player('p1', 'Alpha'));
-    const c = inv({ str: { username: 'Alpha' } }); await handleCommand(h.deps, c.i);
-    const k = click(confirmId(c.last()), { userId: 'intruder' }); await handleButton(h.deps, k.b);
-    expect(k.last().content).toMatch(/not for you/); expect(await listLinks(h.db, 'A')).toHaveLength(0);
-    const x = click(c.last().buttons!.find((b) => b.id.startsWith('lx:'))!.id); await handleButton(h.deps, x.b);
-    expect(await listLinks(h.db, 'A')).toHaveLength(0);
-  });
   it('unknown player and API trouble give DISTINCT messages and store nothing; trouble never means "player does not exist"', async () => {
     const h = await botSetup();
     const a = inv({ str: { username: 'ghost' } }); await handleCommand(h.deps, a.i);
@@ -42,14 +19,6 @@ describe('/link — direct mode (the default for new servers)', () => {
       expect(b.last().content).toMatch(/temporarily unavailable/); expect(b.last().content).not.toMatch(/No Age of Nations player/);
     }
     expect(await listLinks(h.db, 'A')).toHaveLength(0);
-  });
-  it('already linked: must /unlink first; a game account already linked to another member is refused with guidance', async () => {
-    const h = await botSetup(); h.game.names.set('alpha', player('p1', 'Alpha')); h.game.names.set('beta', player('p2', 'Beta'));
-    const link = async (u: string, name: string) => { const c = inv({ userId: u, str: { username: name } }); await handleCommand(h.deps, c.i); if (!c.last().buttons) return c.last().content; const k = click(confirmId(c.last()), { userId: u }); await handleButton(h.deps, k.b); return k.last().content; };
-    expect(await link('u1', 'Alpha')).toContain('Linked to');
-    expect(await link('u1', 'Beta')).toMatch(/already linked in this server/);
-    expect(await link('u2', 'Alpha')).toMatch(/already linked to another member[\s\S]*moderator/);
-    expect(await findLinkForUser(h.db, 'A', 'u2')).toBeNull();
   });
   it('the game username is escaped in replies (no markdown or mention injection)', async () => {
     const h = await botSetup(); h.game.names.set('evil', player('p6', '**@everyone** _x_'));
@@ -70,31 +39,6 @@ describe('/link — direct mode (the default for new servers)', () => {
     const c = inv({ str: { username: 'ghost' } }); await handleCommand(h.deps, c.i);
     expect(c.last().content).toMatch(/لم يتم العثور/);
   });
-  it('a pluggable ownership verifier can veto a link (future stronger verification) without touching the link tables', async () => {
-    const h = await botSetup(); h.game.names.set('alpha', player('p1', 'Alpha'));
-    const seen: string[] = [];
-    const deps = { ...h.deps, verifier: { id: 'challenge', async verify(c: { playerId: string }) { seen.push(c.playerId); return { ok: false as const, reason: 'challenge not found on profile' }; } } };
-    const c = inv({ str: { username: 'Alpha' } }); await handleCommand(deps, c.i);
-    const k = click(confirmId(c.last())); await handleButton(deps, k.b);
-    expect(seen).toEqual(['p1']); expect(k.last().content).toContain('challenge not found on profile'); expect(await listLinks(h.db, 'A')).toHaveLength(0);
-  });
-});
-
-describe('/link — staff-approval mode (optional per server)', () => {
-  it('Confirm creates a PENDING claim that grants nothing until a moderator approves', async () => {
-    const h = await botSetup({ staff: true }); h.game.names.set('alpha', player('p1', 'Alpha'));
-    const c = inv({ str: { username: 'Alpha' } }); await handleCommand(h.deps, c.i);
-    const k = click(confirmId(c.last())); await handleButton(h.deps, k.b);
-    expect(k.last().content).toMatch(/moderator must approve/); expect((await findLinkForUser(h.db, 'A', 'u1'))?.status).toBe('pending');
-  });
-  it('a second claimant on the same account is told it is flagged for review', async () => {
-    const h = await botSetup({ staff: true }); h.game.names.set('alpha', player('p1', 'Alpha'));
-    for (const u of ['u1', 'u2']) {
-      const c = inv({ userId: u, str: { username: 'Alpha' } }); await handleCommand(h.deps, c.i);
-      const k = click(confirmId(c.last()), { userId: u }); await handleButton(h.deps, k.b);
-      if (u === 'u2') expect(k.last().content).toMatch(/another member also claimed/);
-    }
-  });
 });
 
 describe('/unlink', () => {
@@ -102,7 +46,7 @@ describe('/unlink', () => {
     const h = await botSetup(); h.game.names.set('alpha', player('p1', 'Alpha'));
     await addRoleMapping(h.db, { guildId: 'A', kind: 'president', discordRoleId: ROLE.pres, actor: null });
     h.discord.give('A', 'u1', 'UNRELATED'); h.game.roster = rosterOf('eg', [{ userId: 'p1', role: 'president' }, { userId: 'p9', role: 'congress' }]);
-    const c = inv({ str: { username: 'Alpha' } }); await handleCommand(h.deps, c.i); await handleButton(h.deps, click(confirmId(c.last())).b);
+    await verifyViaTicket(h, { playerId: 'p1', username: 'Alpha' });
     return h;
   };
   it('asks for confirmation, removes the link and ONLY the roles the bot granted, keeps unrelated roles, allows re-linking', async () => {
@@ -112,8 +56,7 @@ describe('/unlink', () => {
     const k = click(c.last().buttons![0]!.id); await handleButton(h.deps, k.b);
     expect(k.last().content).toMatch(/Roles removed: 1/);
     expect(await findLinkForUser(h.db, 'A', 'u1')).toBeNull(); expect([...h.discord.has('A', 'u1')]).toEqual(['UNRELATED']);
-    const again = inv({ str: { username: 'Alpha' } }); await handleCommand(h.deps, again.i);
-    await handleButton(h.deps, click(confirmId(again.last())).b); expect(await findLinkForUser(h.db, 'A', 'u1')).not.toBeNull();
+    await verifyViaTicket(h, { playerId: 'p1', username: 'Alpha' }); expect(await findLinkForUser(h.db, 'A', 'u1')).not.toBeNull();     // verifying again after an unlink works
   });
   it('someone else cannot confirm; nothing to unlink is reported; cancel keeps the link', async () => {
     const h = await linked(); const c = inv({ group: 'unlink' }); await handleCommand(h.deps, c.i);
@@ -252,8 +195,7 @@ describe('moderation workflow', () => {
     const h = await botSetup({ staff: true }); h.game.names.set('alpha', player('p1', 'Alpha'));
     await addRoleMapping(h.db, { guildId: 'A', kind: 'president', discordRoleId: ROLE.pres, actor: null });
     h.discord.give('A', 'u1'); h.game.roster = rosterOf('eg', [{ userId: 'p1', role: 'president' }]);
-    const c = inv({ str: { username: 'Alpha' } }); await handleCommand(h.deps, c.i);
-    await handleButton(h.deps, click(confirmId(c.last())).b);
+    await claimLink(h.db, { guildId: 'A', discordUserId: 'u1', playerId: 'p1', username: 'Alpha' });      // a legacy pending claim (staff-approval rows still exist)
 
     const early = inv({ group: 'sync', sub: 'me' }); await handleCommand(h.deps, early.i);
     expect(early.last().content).toMatch(/waiting for moderator approval/);

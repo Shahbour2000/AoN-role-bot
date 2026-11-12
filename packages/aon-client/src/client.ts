@@ -1,6 +1,6 @@
 import type { Fetched } from '@aon/core';
 import { AonHttp, type HttpClientOptions } from './http.js';
-import { extractCountryNames, extractCountryOptions, extractEntityName, type EntityOption, extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
+import { extractCountryNames, extractCountryOptions, extractEntityName, type EntityOption, extractProfileCard, extractStatsCard, extractAllTimeDamageFromProfile, extractAllTimeDamageFromStats, extractCitizensPage, extractCompaniesPage, type CompanyRef, extractGovernmentRoster, extractParties, extractPlayer, extractPlayerProfile, extractUnits, type Citizen, type CitizensIndex, type ProfileCard, type StatsCard, type GovernmentRoster, type PartySummary, type PlayerIdentity, type PlayerProfile, type UnitSummary } from './mappers.js';
 
 const ID = /^[A-Za-z0-9_-]{1,80}$/;
 const bad = (what: string): Fetched<never> => ({ status: 'error', message: `invalid ${what}` });
@@ -106,6 +106,26 @@ export class AonClient {
       return extractAllTimeDamageFromProfile(await this.http.get(`/players/${userId}`));
     }
     return fromStats;
+  }
+
+  /**
+   * EVERY company of a player via `GET /players/{userId}/companies?limit=50&offset=N`, following the pages (the paging hints are used when
+   * the API sends them; otherwise a full page means "ask for the next one"). `ok` only when the listing is provably complete: a partial
+   * list is `incomplete` (verification then fails closed, it never reads "code not found" from a truncated list). Capped at `maxPages`.
+   */
+  async playerCompanies(userId: string, opts: { pageSize?: number; maxPages?: number } = {}): Promise<Fetched<{ companies: CompanyRef[]; pages: number }>> {
+    if (!ID.test(userId)) return bad('userId');
+    const limit = Math.min(100, Math.max(1, opts.pageSize ?? 50)); const maxPages = opts.maxPages ?? 10;
+    const all: CompanyRef[] = []; const seen = new Set<string>();
+    for (let page = 0, offset = 0; ; page++, offset += limit) {
+      if (page >= maxPages) return { status: 'incomplete', missing: ['companies (too many pages)'] };
+      const res = extractCompaniesPage(await this.http.get(`/players/${userId}/companies`, { limit, offset }), userId);
+      if (res.status !== 'ok') return res;
+      for (const c of res.data.companies) { const key = c.id ?? `n:${c.name}`; if (!seen.has(key)) { seen.add(key); all.push(c); } }
+      const more = res.data.hasMore ?? (res.data.total !== null ? offset + res.data.count < res.data.total : res.data.count >= limit);
+      if (!more) return { status: 'ok', data: { companies: all, pages: page + 1 } };
+      if (res.data.count === 0) return { status: 'incomplete', missing: ['companies (empty page while more were announced)'] };
+    }
   }
 
   /**

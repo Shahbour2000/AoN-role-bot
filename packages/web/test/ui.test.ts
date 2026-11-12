@@ -432,7 +432,7 @@ describe('app shell (sidebar, server switcher, mobile drawer, page header)', () 
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`);
     await waitFor(() => p.$('#build-war'), 'builds page');
     const groups = p.$$('#nav .nav-group h4').map((h) => h.textContent); expect(groups).toEqual(['عام', 'الرتب', 'المجتمع', 'التشغيل']);
-    const links = p.$$('#nav a'); expect(links.length).toBe(9); expect(links.every((a) => a.querySelector('svg.icon'))).toBe(true);
+    const links = p.$$('#nav a'); expect(links.length).toBe(10); expect(links.every((a) => a.querySelector('svg.icon'))).toBe(true);
     const cur = p.$$('#nav a[aria-current="page"]'); expect(cur.length).toBe(1); expect((cur[0] as HTMLAnchorElement).getAttribute('href')).toBe(`#/g/${G1}/builds`);
     expect(p.$('.page-head h2')!.textContent).toBe('أدوار البناء'); expect(p.$('.page-head p')!.textContent!.length).toBeGreaterThan(5);
   });

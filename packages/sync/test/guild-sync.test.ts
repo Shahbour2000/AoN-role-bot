@@ -59,17 +59,17 @@ describe('/sync all', () => {
     expect(r.error).toMatch(/rate_limited/);
     for (const n of [1, 2, 3, 4, 5]) expect(h.discord.has('A', `d${n}`).has(ROLE.pres)).toBe(true);
   });
-  it('CROSS-GUILD: each guild only uses its own links, mappings and roles', async () => {
+  it('CROSS-GUILD: one global identity, but each guild only uses its own mappings and roles', async () => {
     const h = await setup({ guilds: ['A', 'B'] });
     await map(h.db, 'A', 'president', ROLE.pres); await map(h.db, 'B', 'president', ROLE.vice);
-    await link(h.db, 'A', 'dA', 'p1'); await link(h.db, 'B', 'dB', 'p1');
-    h.discord.give('A', 'dA'); h.discord.give('B', 'dB');
+    await link(h.db, 'A', 'd1', 'p1'); await link(h.db, 'B', 'd1', 'p1');           // the SAME member in both servers (links are global: a game account cannot belong to two Discord users)
+    h.discord.give('A', 'd1'); h.discord.give('B', 'd1');
     h.game.roster = rosterOf('eg', [{ userId: 'p1', role: 'president' }]);
     await syncGuild({ db: h.db, game: h.game, discord: h.discord }, { guildId: 'A', kind: 'all', requestedBy: null });
-    expect([...h.discord.has('A', 'dA')]).toEqual([ROLE.pres]);
-    expect(h.discord.has('B', 'dB').size).toBe(0);           // B untouched by A's run
+    expect([...h.discord.has('A', 'd1')]).toEqual([ROLE.pres]);
+    expect(h.discord.has('B', 'd1').size).toBe(0);           // B untouched by A's run
     await syncGuild({ db: h.db, game: h.game, discord: h.discord }, { guildId: 'B', kind: 'all', requestedBy: null });
-    expect([...h.discord.has('B', 'dB')]).toEqual([ROLE.vice]);
+    expect([...h.discord.has('B', 'd1')]).toEqual([ROLE.vice]); expect([...h.discord.has('A', 'd1')]).toEqual([ROLE.pres]);
   });
   it('an unconfigured guild is reported, and a second run changes nothing (idempotent)', async () => {
     const h = await setup();

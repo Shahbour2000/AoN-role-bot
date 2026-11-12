@@ -1,10 +1,10 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction } from 'discord.js';
-import type { ButtonInvocation, Invocation, Reply } from './handlers.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ModalSubmitInteraction } from 'discord.js';
+import type { ButtonInvocation, Invocation, ModalInvocation, Reply } from './handlers.js';
 
 const canManage = (i: { memberPermissions: { has(p: bigint): boolean } | null }) =>
   !!i.memberPermissions && (i.memberPermissions.has(PermissionFlagsBits.ManageGuild) || i.memberPermissions.has(PermissionFlagsBits.Administrator));
 
-function components(r: Reply) {
+export function components(r: Reply) {
   if (!r.buttons?.length) return [];
   return [new ActionRowBuilder<ButtonBuilder>().addComponents(r.buttons.map((b) => new ButtonBuilder().setCustomId(b.id).setLabel(b.label).setStyle(b.primary ? ButtonStyle.Primary : ButtonStyle.Secondary)))];
 }
@@ -27,8 +27,26 @@ export function toInvocation(i: ChatInputCommandInteraction): Invocation {
 }
 
 export function toButtonInvocation(i: ButtonInteraction): ButtonInvocation {
+  let deferredUpdate = false;
+  const body = (r: Reply) => ({ content: r.content, components: components(r), allowedMentions: { parse: [] as never[] } });
   return {
     guildId: i.guildId, userId: i.user.id, canManageGuild: canManage(i), customId: i.customId,
-    update: async (r) => { await i.update({ content: r.content, components: components(r), allowedMentions: { parse: [] } }); },
+    update: async (r) => { if (deferredUpdate) await i.editReply(body(r)); else await i.update(body(r)); },
+    deferUpdate: async () => { await i.deferUpdate(); deferredUpdate = true; },
+    deferReply: async () => { await i.deferReply({ flags: MessageFlags.Ephemeral }); },
+    reply: async (r) => { if (i.deferred || i.replied) await i.editReply(body(r)); else await i.reply({ ...body(r), flags: MessageFlags.Ephemeral }); },
+    showModal: async (m) => {
+      await i.showModal(new ModalBuilder().setCustomId(m.id).setTitle(m.title).addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId(m.fieldId).setLabel(m.label).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(m.maxLength))));
+    },
+  };
+}
+
+export function toModalInvocation(i: ModalSubmitInteraction): ModalInvocation {
+  const body = (r: Reply) => ({ content: r.content, components: components(r), allowedMentions: { parse: [] as never[] } });
+  return {
+    guildId: i.guildId, userId: i.user.id, customId: i.customId, field: (id) => i.fields.getTextInputValue(id).trim(),
+    deferReply: async () => { await i.deferReply({ flags: MessageFlags.Ephemeral }); },
+    reply: async (r) => { if (i.deferred || i.replied) await i.editReply(body(r)); else await i.reply({ ...body(r), flags: MessageFlags.Ephemeral }); },
   };
 }

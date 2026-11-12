@@ -8,6 +8,7 @@ import { partyOptions, unitOptions, type EntityOption, type PartySummary, type P
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
   getSyncStatus, listAudit, listLinksDetailed, listRoleMappings, listSyncJobs, removeRoleMapping, reviewLink, saveLadder, updateGuildSettings, DEFAULT_LADDER_SEED, type Db,
+  verificationStats,
 } from '@aon/db';
 import type { WebConfig } from './config.js';
 import { open, pkceChallenge, randomToken, safeEqual, seal, sha256 } from './crypto.js';
@@ -217,6 +218,8 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     demotionMode: z.enum(['never', 'immediate', 'grace']), demotionGraceDays: z.number().int().min(1).max(365),
     /** Must be true to apply a server-type change that makes existing role mappings inapplicable (they are then removed). */
     confirmRemoveIncompatible: z.boolean(),
+    /** Discord channel id where the verification panel is posted; must be a text channel of THIS server (checked against Discord). */
+    verificationChannelId: z.string().regex(SNOWFLAKE).nullable(),
     autoSyncEnabled: z.boolean(), syncIntervalHours: z.union([z.literal(3), z.literal(6), z.literal(12), z.literal(24)]),
   }).partial().strict();
 
@@ -247,6 +250,14 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (b.syncIntervalHours !== undefined) patch.sync_interval_minutes = b.syncIntervalHours * 60;
     if (b.linkMode !== undefined) patch.require_staff_approval = b.linkMode === 'staff_approval';
     if (b.unitLeaderReplacesMember !== undefined) patch.unit_leader_replaces_member = b.unitLeaderReplacesMember;
+    if (b.verificationChannelId !== undefined) {
+      if (b.verificationChannelId !== null) {
+        const chans = await deps.botRest.listChannels(a.guildId);
+        if (!chans) return fail(reply, 503, 'discord_unavailable');
+        if (!chans.some((c) => c.id === b.verificationChannelId && TEXT_CHANNEL.has(c.type))) return fail(reply, 422, 'invalid_channel');   // a channel of another server is never accepted
+      }
+      patch.verification_channel_id = b.verificationChannelId;
+    }
     let removedMappings = 0;
     try { removedMappings = (await updateGuildSettings(db, a.guildId, patch, a.session.discordUserId, clock(), { confirmRemoveIncompatible: b.confirmRemoveIncompatible === true })).removedMappings.length; }   // re-anchors the durable schedule atomically
     catch (e) {
@@ -280,6 +291,19 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const a = await guard(req, reply); if (!a) return;
     const roles = await rolesFor(a.guildId);
     return roles ? { roles } : fail(reply, 503, 'discord_unavailable');
+  });
+
+  // ------------------------------------------------------------------ verification tickets
+  const TEXT_CHANNEL = new Set([0, 5]);                      // text, announcement
+  app.get('/api/guilds/:guildId/channels', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const chans = await deps.botRest.listChannels(a.guildId);
+    return chans ? { channels: chans.filter((c) => TEXT_CHANNEL.has(c.type)).sort((x, y) => x.position - y.position).map((c) => ({ id: c.id, name: c.name })) } : fail(reply, 503, 'discord_unavailable');
+  });
+  app.get('/api/guilds/:guildId/verification', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const [stats, cfg] = await Promise.all([verificationStats(db, a.guildId, clock()), getGuildConfig(db, a.guildId)]);
+    return { channelId: cfg?.verificationChannelId ?? null, ...stats };
   });
 
   // ------------------------------------------------------------------ military ranks
@@ -377,7 +401,9 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (player.status === 'not_found') return fail(reply, 404, 'player_not_found');
     if (player.status !== 'ok') return fail(reply, 503, 'game_api_unavailable');
     const res = await forceLink(db, { guildId: a.guildId, adminId: a.session.discordUserId, discordUserId: b.data.discordUserId, playerId: player.data.id, username: player.data.username, ...(b.data.reason ? { reason: b.data.reason } : {}), ...(b.data.replace ? { replace: true } : {}) });
-    return res.ok ? { ok: true, player: player.data, replaced: res.replaced } : fail(reply, 409, 'conflict_requires_replace');
+    if (!res.ok) return fail(reply, 409, res.code === 'GLOBAL_CONFLICT' ? 'global_conflict' : 'conflict_requires_replace');   // a proven (company-verified) link can only be recovered by the bot operator
+    if (deps.onUnlinked) for (const d of res.displaced) for (const g of d.guilds) if (g.managedRoleIds.length) await deps.onUnlinked(g.guildId, d.discordUserId, g.managedRoleIds).catch((e) => log(`unlink cleanup failed: ${e instanceof Error ? e.message.slice(0, 80) : 'error'}`));
+    return { ok: true, player: player.data, replaced: res.replaced };
   });
 
   // ------------------------------------------------------------------ player build roles (War / Eco / Hybrid)

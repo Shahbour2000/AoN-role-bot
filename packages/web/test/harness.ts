@@ -44,6 +44,8 @@ export class FakeBotRest implements DiscordBotRest {
   roles = new Map<string, DiscordRole[]>();
   top = new Map<string, number>();
   down = false;
+  channels = new Map<string, { id: string; name: string; type: number; position: number }[]>();
+  async listChannels(g: string) { return this.down ? null : this.channels.get(g) ?? []; }
   async listRoles(g: string) { return this.down ? null : this.roles.get(g) ?? null; }
   async botTopRolePosition(g: string) { return this.down ? null : this.top.get(g) ?? 0; }
 }

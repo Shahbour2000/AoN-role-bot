@@ -1,6 +1,6 @@
 import { DEFAULT_RANKS, type RankDefinition } from '@aon/core';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { addRoleMapping, claimLink, findLinkForUser, getGuildConfig, getLadder, getRetiredRankRoles, listLinks, saveLadder, seedDefaultLadder, unlinkWithRoles, updateGuildSettings, clearRetiredRankRoles, startSyncJob, finishSyncJob, type Db } from '../src/index.js';
+import { addRoleMapping, claimLink, unlinkGlobalSelf, findLinkForUser, getGuildConfig, getLadder, getRetiredRankRoles, listLinks, saveLadder, seedDefaultLadder, unlinkWithRoles, updateGuildSettings, clearRetiredRankRoles, startSyncJob, finishSyncJob, type Db } from '../src/index.js';
 import { addGuild, freshDb, rejects } from './helpers.js';
 
 let db: Db;
@@ -36,7 +36,8 @@ describe('direct linking (name-only, ownership not proven)', () => {
     await direct('A', 'u1', 'p1');
     expect(await direct('A', 'u1', 'p2')).toEqual({ ok: false, code: 'ALREADY_LINKED_SELF' });
     expect(await direct('A', 'u2', 'p1')).toEqual({ ok: false, code: 'PLAYER_ALREADY_LINKED' });
-    expect((await direct('B', 'u2', 'p1')).ok).toBe(true);                        // another guild is independent
+    expect(await direct('B', 'u2', 'p1')).toEqual({ ok: false, code: 'PLAYER_ALREADY_LINKED' });          // the link is GLOBAL: another server does not make the account free
+    expect((await direct('B', 'u1', 'p1')).ok).toBe(true);                                                // the same pair in another server is the same global link
   });
   it('two members racing for one game account: exactly one wins, the other gets a clean refusal (no exception)', async () => {
     const [x, y] = await Promise.all([direct('A', 'u1', 'p1'), direct('A', 'u2', 'p1')]);
@@ -51,11 +52,12 @@ describe('direct linking (name-only, ownership not proven)', () => {
   });
   it('re-linking requires an unlink first, and the old link keeps its history', async () => {
     await direct('A', 'u1', 'p1');
-    const removed = await unlinkWithRoles(db, { guildId: 'A', actorId: 'u1', discordUserId: 'u1', action: 'link.unlinked_self' });
-    expect(removed).toHaveLength(1); expect(await findLinkForUser(db, 'A', 'u1')).toBeNull();
+    expect(await direct('A', 'u1', 'p2')).toMatchObject({ ok: false });                                       // a server-level unlink would not free the global identity...
+    const removed = await unlinkGlobalSelf(db, { discordUserId: 'u1', guildId: 'A' });                         // ...the member's own (global) unlink does
+    expect(removed?.guilds).toHaveLength(1); expect(await findLinkForUser(db, 'A', 'u1')).toBeNull();
     expect((await direct('A', 'u1', 'p2')).ok).toBe(true);
     expect((await listLinks(db, 'A', 'unlinked'))).toHaveLength(1);
-    expect(await auditActions()).toEqual(expect.arrayContaining(['link.direct', 'link.unlinked_self']));
+    expect(await auditActions()).toEqual(expect.arrayContaining(['link.direct', 'link.unlinked_self_global']));
   });
   it('unlinkWithRoles returns the roles the bot granted (to be taken off the member) and clears them', async () => {
     await direct('A', 'u1', 'p1');

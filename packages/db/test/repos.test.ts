@@ -139,7 +139,7 @@ describe('account linking', () => {
 describe('/force link', () => {
   it('links directly, marked admin_linked, and audited with the reason', async () => {
     const r = await forceLink(db, { guildId: 'A', adminId: 'adm', discordUserId: 'u1', playerId: 'p1', username: 'P1', reason: 'verified in voice' });
-    expect(r).toEqual({ ok: true, replaced: [] });
+    expect(r).toEqual({ ok: true, replaced: [], displaced: [] });
     const [l] = await listLinks(db, 'A', 'admin_linked');
     expect(l).toMatchObject({ discord_user_id: 'u1', method: 'admin_forced' });
     expect(await actions('A')).toContain('link.admin_linked');
@@ -148,7 +148,7 @@ describe('/force link', () => {
     await forceLink(db, { guildId: 'A', adminId: 'adm', discordUserId: 'u1', playerId: 'p1', username: null });
     expect(await forceLink(db, { guildId: 'A', adminId: 'adm', discordUserId: 'u2', playerId: 'p1', username: null })).toEqual({ ok: false, code: 'CONFLICT_REQUIRES_REPLACE' });
     const r = await forceLink(db, { guildId: 'A', adminId: 'adm', discordUserId: 'u2', playerId: 'p1', username: null, replace: true });
-    expect(r).toEqual({ ok: true, replaced: ['p1'] });
+    expect(r).toMatchObject({ ok: true, replaced: ['p1'], displaced: [{ discordUserId: 'u1', playerId: 'p1' }] });
     expect((await listLinks(db, 'A', 'admin_linked')).map((l) => l.discord_user_id)).toEqual(['u2']);
     expect(await actions('A')).toContain('link.unlinked_by_replace');
   });

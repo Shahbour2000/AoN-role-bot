@@ -15,7 +15,10 @@ export interface DiscordBotRest {
   /** null = could not be read (bot not in guild / missing access / API down). */
   listRoles(guildId: string): Promise<DiscordRole[] | null>;
   botTopRolePosition(guildId: string): Promise<number | null>;
+  /** Text channels of the server (null = could not be read). Used to choose the verification channel. */
+  listChannels(guildId: string): Promise<DiscordChannel[] | null>;
 }
+export interface DiscordChannel { id: string; name: string; type: number; position: number }
 
 const API = 'https://discord.com/api/v10';
 
@@ -56,6 +59,7 @@ export function createDiscordBotRest(o: { botToken: string; clientId: string; fe
   };
   return {
     listRoles: (g) => get<DiscordRole[]>(`/guilds/${g}/roles`),
+    async listChannels(g) { const r = await get<{ id: string; name: string; type: number; position?: number }[]>(`/guilds/${g}/channels`); return r ? r.map((c) => ({ id: c.id, name: c.name, type: c.type, position: c.position ?? 0 })) : null; },
     async botTopRolePosition(g) {
       const [roles, me] = await Promise.all([get<DiscordRole[]>(`/guilds/${g}/roles`), get<{ roles: string[] }>(`/guilds/${g}/members/${o.clientId}`)]);
       if (!roles || !me) return null;

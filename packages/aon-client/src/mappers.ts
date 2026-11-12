@@ -377,3 +377,32 @@ export function extractEntityName(res: Fetched<unknown>): Fetched<string> {
   const n = isObj(res.data) && typeof res.data['name'] === 'string' ? res.data['name'].trim() : '';
   return n ? { status: 'ok', data: n } : { status: 'incomplete', missing: ['name'] };
 }
+
+// ---- GET /players/{userId}/companies?limit&offset ---------------------------------------------------------------------
+/**
+ * SHAPE STATUS: UNVERIFIED against a live response (the OpenAPI file declares the 200 body as a free-form object; the project has no
+ * sample). What is assumed, and nothing more: a list of company objects either as the top-level array or under `companies`/`items`,
+ * each with a string `name` (the owner states that names are exposed). `id` is read when present. `ownerId`, when present, must equal
+ * the requested player (otherwise the entry is ignored). Paging hints `total` / `hasMore` are used when present. If an entry has no
+ * string `name`, or no list can be found, the page is `incomplete`: verification then FAILS CLOSED, it never guesses.
+ */
+export interface CompanyRef { id: string | null; name: string }
+export interface CompaniesPage { companies: CompanyRef[]; count: number; total: number | null; hasMore: boolean | null; ignoredForeignOwner: number }
+export function extractCompaniesPage(res: Fetched<unknown>, playerId: string): Fetched<CompaniesPage> {
+  if (res.status !== 'ok') return res;
+  const b = res.data;
+  const list = Array.isArray(b) ? b : isObj(b) ? (['companies', 'items'] as const).map((k) => b[k]).find(Array.isArray) : undefined;
+  if (!Array.isArray(list)) return { status: 'incomplete', missing: ['companies[]'] };
+  const companies: CompanyRef[] = []; const bad: string[] = []; let foreign = 0;
+  list.forEach((c, i) => {
+    if (!isObj(c)) return bad.push(`companies[${i}]`);
+    const owner = c['ownerId'] ?? c['userId'];
+    if (owner !== undefined && owner !== null && idString(owner) !== playerId) { foreign++; return; }
+    if (typeof c['name'] !== 'string') return bad.push(`companies[${i}].name`);
+    companies.push({ id: idString(c['id']), name: c['name'] });
+  });
+  if (bad.length) return { status: 'incomplete', missing: bad.slice(0, 5) };
+  const total = isObj(b) && typeof b['total'] === 'number' && Number.isInteger(b['total']) && b['total'] >= 0 ? b['total'] : null;
+  const hasMore = isObj(b) && typeof b['hasMore'] === 'boolean' ? b['hasMore'] : null;
+  return { status: 'ok', data: { companies, count: list.length, total, hasMore, ignoredForeignOwner: foreign } };
+}

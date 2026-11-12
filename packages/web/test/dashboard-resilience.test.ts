@@ -18,10 +18,10 @@ const bad = (status: number, error: string) => ({ ok: false, status, json: async
 const SESSION = { user: { id: '1', username: 'abu' }, csrfToken: 'x' };
 const hang: Fetch = (_u, init) => new Promise((_res, rej) => init?.signal?.addEventListener('abort', () => rej(new Error('aborted'))));
 
-async function openApp(fetchImpl: Fetch, opts: { compressTimeout?: boolean } = {}) {
-  const dom = new JSDOM(read('app.html'), { url: 'https://example.test/app', runScripts: 'outside-only', pretendToBeVisual: true });
+async function openApp(fetchImpl: Fetch, opts: { compressTimeout?: boolean; hash?: string } = {}) {
+  const dom = new JSDOM(read('app.html'), { url: `https://example.test/app${opts.hash ?? ''}`, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window as unknown as Window & typeof globalThis & { fetch: unknown };
-  w.fetch = fetchImpl;
+  w.fetch = fetchImpl as unknown as typeof w.fetch;
   if (opts.compressTimeout) {                      // the client timeouts are 20 s; shrink them so the test is fast but the real code path runs
     const realSet = w.setTimeout.bind(w);
     (w as unknown as { setTimeout: unknown }).setTimeout = (f: () => void, ms?: number, ...a: unknown[]) => realSet(f, ms !== undefined && ms >= 20000 ? 150 : ms, ...a);
@@ -104,5 +104,37 @@ describe('dictionary parity for the new error strings', () => {
     const w = { I18N: undefined as unknown } as { I18N: Record<'ar' | 'en', Record<string, string>> }; new Function('window', read('i18n.js'))(w);
     for (const k of ['e_network', 'e_timeout', 'e_server', 'retry']) { expect(w.I18N.ar[k], `ar ${k}`).toBeTruthy(); expect(w.I18N.en[k], `en ${k}`).toBeTruthy(); }
     expect(Object.keys(w.I18N.ar).sort()).toEqual(Object.keys(w.I18N.en).sort());
+  });
+});
+
+describe('verification page', () => {
+  const GID = '123456789012345678';
+  const data = { channelId: '700001', last30d: { pending: 1, verified: 2, expired: 1, cancelled: 0, locked: 0, superseded: 0 }, linkedMembers: { total: 3, byMethod: { company_verified: 2, legacy_unverified: 1 } },
+    recent: [{ id: 'a1', discordUserId: '555', playerId: 'P1', playerUsername: '<img src=x onerror=alert(1)>', status: 'verified', createdAt: '2026-11-11T10:00:00Z', checkCount: 2, lastResult: 'verified' }] };
+  it('renders statistics, channels and attempts (member-controlled names are text, never markup) and saves the channel with a PUT', async () => {
+    const calls: { url: string; method?: string; body?: string }[] = [];
+    const f: Fetch = async (u, init) => {
+      calls.push({ url: u, ...(init as { method?: string; body?: string } | undefined) });
+      if (u.startsWith('/api/session')) return ok(SESSION);
+      if (u.startsWith('/api/guilds') && !u.includes('/api/guilds/')) return ok({ guilds: [{ id: GID, name: 'G', icon: null, installed: true }] });
+      if (u.endsWith('/verification')) return ok(data);
+      if (u.endsWith('/channels')) return ok({ channels: [{ id: '700001', name: 'verify-here' }, { id: '700003', name: 'news' }] });
+      if (u.endsWith('/settings') && (init as { method?: string } | undefined)?.method === 'PUT') return ok({ settings: {} });
+      return ok({});
+    };
+    const { w, root, settle } = await openApp(f, { hash: `#/g/${GID}/verify` });
+    await settle(() => !!root.querySelector('#vf-save'));
+    expect(root.querySelector('#vf-save')).not.toBeNull(); expect(root.querySelectorAll('.stat').length).toBe(4);
+    expect(root.querySelector('img')).toBeNull(); expect(root.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect((root.querySelector('#vf-channel') as HTMLSelectElement).value).toBe('700001'); expect(root.querySelector('.callout.warn')).not.toBeNull();   // legacy members note
+    (root.querySelector('#vf-channel') as HTMLSelectElement).value = '700003'; (root.querySelector('#vf-save') as HTMLElement).click();
+    await settle(() => calls.some((c) => c.method === 'PUT'));
+    const put = calls.find((c) => c.method === 'PUT')!; expect(JSON.parse(put.body!)).toEqual({ verificationChannelId: '700003' });
+    expect(w.document.querySelectorAll('#nav a').length).toBe(10);
+  });
+  it('a failing statistics request ends in an error panel with Retry', async () => {
+    const f: Fetch = async (u) => (u.startsWith('/api/session') ? ok(SESSION) : u.endsWith('/verification') ? bad(503, 'discord_unavailable') : u.endsWith('/channels') ? ok({ channels: [] }) : ok({ guilds: [{ id: GID, name: 'G', icon: null, installed: true }] }));
+    const { root, settle } = await openApp(f, { hash: `#/g/${GID}/verify` });
+    await settle(() => !!root.querySelector('#retry')); expect(root.querySelector('#retry')).not.toBeNull(); expect(root.querySelector('.skeleton')).toBeNull();
   });
 });

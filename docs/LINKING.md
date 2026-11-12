@@ -1,3 +1,5 @@
+> **Superseded in part (Phase 1):** links are now global and ownership is proven by a company-name ticket. See [VERIFICATION.md](VERIFICATION.md). The text below describes the earlier per-server, name-only model that existing links migrated from.
+
 # Linking a Discord account to a game account
 
 ## How it works

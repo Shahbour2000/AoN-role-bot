@@ -15,6 +15,8 @@ get player_by_name "/players/by-name/$USERNAME"
 ID=$(python3 -c "import json;d=json.load(open('$OUT/player_by_name.json'));print(d.get('id') or d.get('_id') or d.get('player',{}).get('id',''))" 2>/dev/null || true)
 echo "resolved player id: ${ID:-<not found: open $OUT/player_by_name.json and pass the id manually>}"
 [ -n "$ID" ] && get player_stats "/players/$ID/stats" && get player_profile "/players/$ID"
+# Company names are what ownership verification reads: capture the real shape (needs a player who owns at least one company).
+[ -n "$ID" ] && get player_companies "/players/$ID/companies?limit=50&offset=0"
 get gov_members "/countries/$COUNTRY/government/members"
 get gov "/countries/$COUNTRY/government"
 get parties "/countries/$COUNTRY/parties"

@@ -2,12 +2,14 @@ import { randomBytes } from 'node:crypto';
 import type { Fetched } from '@aon/core';
 import type { HttpStats, PlayerIdentity, ProfileCard, StatsCard } from '@aon/client';
 import {
-  claimLink, ensureGuild, findLinkForUser, forceLink, getGuildConfig, getLadder, listActiveLinks, listPendingLinks, listRoleMappings, reviewLink, unlinkWithRoles,
-  type Db,
+  claimLink, ensureGuild, ensureGuildLink, findLinkForUser, forceLink, getGlobalLinkForUser, unlinkGlobalSelf, getGuildConfig, getLadder, listActiveLinks, listPendingLinks, listRoleMappings, reviewLink, unlinkWithRoles,
+  getPendingAttemptForUser, audit, type Db,
 } from '@aon/db';
 import { syncGuild, syncOneUser, type DiscordGateway, type GameData, type GuildSyncDeps, type UserSyncResult } from '@aon/sync';
 import { t, type Lang, type MsgKey } from './messages.js';
 import { buildProfileEmbed, type EmbedJson } from './profile-card.js';
+import { checkTicket, closeTicket, newCode, openTicket, panelReply } from './verification.js';
+import { describeSync, esc, gameFailure, removeGrantedRoles, syncDeps } from './shared.js';
 
 export interface Reply { content: string; buttons?: { id: string; label: string; primary?: boolean }[]; embed?: EmbedJson }
 
@@ -29,10 +31,17 @@ export interface Invocation {
   /** Replies (or edits the deferred reply). Always ephemeral. */
   reply(r: Reply): Promise<void>;
 }
+export interface ModalSpec { id: string; title: string; fieldId: string; label: string; maxLength: number }
 export interface ButtonInvocation {
   guildId: string | null; userId: string; canManageGuild: boolean; customId: string;
   update(r: Reply): Promise<void>;
+  /** Acknowledge now, answer later with `update` (Discord allows 3 s; game-API checks can take longer). */
+  deferUpdate?(): Promise<void>;
+  /** Private reply that leaves the clicked (public) message untouched. */
+  deferReply?(): Promise<void>; reply?(r: Reply): Promise<void>;
+  showModal?(m: ModalSpec): Promise<void>;
 }
+export interface ModalInvocation { guildId: string | null; userId: string; customId: string; field(id: string): string; deferReply?(): Promise<void>; reply(r: Reply): Promise<void> }
 export interface BotDeps {
   db: Db;
   game: GameData & {
@@ -40,7 +49,11 @@ export interface BotDeps {
     playerCard(id: string): Promise<{ profile: Fetched<ProfileCard>; stats: Fetched<StatsCard> }>;
     /** Optional: display name of a country (null when unknown). */
     countryName?(id: string): Promise<string | null>;
+    /** All companies of a player (`GET /players/{id}/companies`, paginated by the client). The proof of ownership is read from here only. */
+    playerCompanies(id: string): Promise<Fetched<{ companies: { id: string | null; name: string }[] }>>;
   };
+  /** Posts the verification panel into a channel of that server (supplied by the Discord adapter; absent in tests that do not need it). */
+  postPanel?: (guildId: string, channelId: string, panel: Reply) => Promise<void>;
   verifier?: OwnershipVerifier;
   /** Where relative avatar paths live (UNVERIFIED assumption about the game's media host; configurable). */
   mediaBaseUrl?: string;
@@ -67,42 +80,11 @@ export async function onGuildInstalled(db: Db, guildId: string, name: string): P
   await ensureGuild(db, guildId, name);          // the optional military-rank system gets its 17 starter ranks only when an admin enables it
 }
 
-/** Takes the roles the bot had granted off a member who was unlinked. Only roles the bot is currently able to manage are touched. */
-async function removeGrantedRoles(deps: BotDeps, guildId: string, userId: string, roleIds: string[]): Promise<number> {
-  if (!roleIds.length) return 0;
-  const assignable = await deps.discord.assignableRoles(guildId).catch(() => new Set<string>());
-  let n = 0;
-  for (const r of roleIds) {
-    if (!assignable.has(r)) continue;
-    try { await deps.discord.removeRole(guildId, userId, r, 'AoN role bot: account unlinked'); n++; } catch (e) { deps.log?.(`unlink cleanup: could not remove ${r} from ${userId}: ${e instanceof Error ? e.message.slice(0, 80) : 'error'}`); }
-  }
-  return n;
-}
-
-const esc = (x: string): string => x.replace(/[\\*_~`|>[\]()#-]/g, (c) => `\\${c}`).replace(/@/g, '@\u200b');
-const roleList = (ids: string[]) => (ids.length ? ids.map((r) => `<@&${r}>`).join(' ') : '—');
-
-function describeSync(lang: Lang, r: UserSyncResult): string {
-  const parts: string[] = [];
-  if (r.outcome === 'failed') return t(lang, 'sync_failed');
-  if (r.outcome === 'skipped') return t(lang, 'sync_skipped_member');
-  if (r.added.length || r.removed.length) parts.push(t(lang, 'sync_done', { added: roleList(r.added), removed: roleList(r.removed) }));
-  else if (r.outcome === 'unchanged') parts.push(t(lang, 'sync_nochange'));
-  if (r.outcome === 'partial') parts.push(t(lang, 'sync_partial'));
-  if (r.blocked.length) parts.push(t(lang, 'sync_blocked', { n: r.blocked.length }));
-  return parts.join('\n') || t(lang, 'sync_nochange');
-}
-
-function gameFailure(lang: Lang, res: Fetched<unknown>): string | null {
-  if (res.status === 'ok') return null;
-  return res.status === 'not_found' ? t(lang, 'player_not_found') : t(lang, 'api_down');
-}
-
 function onCooldown(deps: BotDeps, userId: string, scope: string): boolean {
   const now = (deps.now ?? (() => new Date()))().getTime();
   const key = `${scope}:${userId}`;
   const last = cooldowns.get(key);
-  if (last !== undefined && now - last < (deps.cooldownMs ?? 10_000)) return true;
+  if (last !== undefined && now >= last && now - last < (deps.cooldownMs ?? 10_000)) return true;   // a clock that moved backwards never blocks
   cooldowns.set(key, now);
   return false;
 }
@@ -120,27 +102,31 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
   const needAdmin = async () => { if (inv.canManageGuild) return true; await inv.reply({ content: t(lang, 'not_admin') }); return false; }; // enforced server-side, per call
 
   switch (`${inv.group}/${inv.sub}`) {
-    case 'link/link': {
-      if (onCooldown(deps, inv.userId, 'link')) return inv.reply({ content: t(lang, 'cooldown') });
-      const mine = await findLinkForUser(deps.db, inv.guildId, inv.userId);
-      if (mine && mine.status !== 'pending') return inv.reply({ content: t(lang, 'link_already_self') });   // re-linking needs an explicit /unlink first
+    case 'link/link': case 'verify/verify': {   // `/link` is now an alias: it starts verification (a name-only claim is no longer accepted)
+      if (onCooldown(deps, inv.userId, 'verify')) return inv.reply({ content: t(lang, 'cooldown') });
       await inv.defer();
-      const res = await deps.game.playerByName(inv.str('username') ?? '');
-      const fail = gameFailure(lang, res);
-      if (fail || res.status !== 'ok') return inv.reply({ content: fail ?? t(lang, 'api_down') });
-      const tk = token();
-      pending.set(tk, { kind: 'link', userId: inv.userId, playerId: res.data.id, username: res.data.username, expires: nowMs + TTL_MS });
-      return inv.reply({ content: t(lang, 'link_preview', { name: esc(res.data.username ?? res.data.id), id: res.data.id }), buttons: [{ id: `lc:${tk}`, label: t(lang, 'link_confirm_btn'), primary: true }, { id: `lx:${tk}`, label: t(lang, 'link_cancel_btn') }] });
+      return inv.reply(await openTicket({ deps, guildId: inv.guildId, userId: inv.userId }, inv.str('username')));
+    }
+    case 'admin/verify-panel': {
+      if (!(await needAdmin())) return;
+      const ch = cfg.verificationChannelId;
+      if (!ch) return inv.reply({ content: t(lang, 'vt_no_channel') });
+      try { if (!deps.postPanel) throw new Error('no adapter'); await deps.postPanel(inv.guildId, ch, panelReply(lang)); }
+      catch { return inv.reply({ content: t(lang, 'vt_panel_failed', { ch }) }); }
+      await audit(deps.db, { guildId: inv.guildId, actor: inv.userId, action: 'verification.panel_posted', target: ch });
+      return inv.reply({ content: t(lang, 'vt_panel_posted', { ch }) });
     }
     case 'unlink/unlink': {
       const mine = await findLinkForUser(deps.db, inv.guildId, inv.userId);
-      if (!mine) return inv.reply({ content: t(lang, 'unlink_self_none') });
-      const tk = token(); const nm = mine.username ?? mine.playerId;
+      const gl = await getGlobalLinkForUser(deps.db, inv.userId);
+      if (!mine && !gl) return inv.reply({ content: t(lang, 'unlink_self_none') });
+      const tk = token(); const nm = gl?.username ?? gl?.playerId ?? mine!.username ?? mine!.playerId;
       pending.set(tk, { kind: 'unlink', userId: inv.userId, name: nm, expires: nowMs + TTL_MS });
-      return inv.reply({ content: t(lang, 'unlink_confirm', { name: esc(nm) }), buttons: [{ id: `ul:${tk}`, label: t(lang, 'link_confirm_btn'), primary: true }, { id: `lx:${tk}`, label: t(lang, 'link_cancel_btn') }] });
+      return inv.reply({ content: t(lang, 'unlink_confirm', { name: esc(nm) }) + (gl ? `\n${t(lang, 'unlink_global_hint')}` : ''), buttons: [{ id: `ul:${tk}`, label: t(lang, 'link_confirm_btn'), primary: true }, { id: `lx:${tk}`, label: t(lang, 'link_cancel_btn') }] });
     }
     case 'profile/profile': {
       const target = inv.user('user') ?? inv.userId; const mine = target === inv.userId;
+      if (mine) await ensureGuildLink(deps.db, { guildId: inv.guildId, discordUserId: inv.userId });
       const link = await findLinkForUser(deps.db, inv.guildId, target);
       if (!link) return inv.reply({ content: mine ? t(lang, 'profile_not_linked') : t(lang, 'profile_other_not_linked', { user: target }) });
       if (link.status === 'pending') return inv.reply({ content: t(lang, 'profile_pending') });
@@ -155,12 +141,14 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
       return inv.reply({ content: '', embed });
     }
     case 'link-status/link-status': {
+      await ensureGuildLink(deps.db, { guildId: inv.guildId, discordUserId: inv.userId });
       const l = await findLinkForUser(deps.db, inv.guildId, inv.userId);
       if (!l) return inv.reply({ content: t(lang, 'status_none') });
       const nm = esc(l.username ?? l.playerId);
       return inv.reply({ content: l.status === 'pending' ? t(lang, 'status_pending', { name: nm, id: l.playerId }) : t(lang, 'status_linked', { name: nm, id: l.playerId, sync: l.lastSyncedAt ? `<t:${Math.floor(l.lastSyncedAt.getTime() / 1000)}:R>` : t(lang, 'never') }) });
     }
     case 'sync/me': {
+      await ensureGuildLink(deps.db, { guildId: inv.guildId, discordUserId: inv.userId });
       const l = await findLinkForUser(deps.db, inv.guildId, inv.userId);
       if (!l) return inv.reply({ content: t(lang, 'sync_need_link') });
       if (l.status === 'pending') return inv.reply({ content: t(lang, 'sync_need_approval') });
@@ -232,11 +220,32 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
   }
 }
 
+export async function handleModal(deps: BotDeps, inv: ModalInvocation): Promise<void> {
+  if (inv.customId !== 'vm:open' || !inv.guildId) return;
+  await inv.deferReply?.();
+  await inv.reply(await openTicket({ deps, guildId: inv.guildId, userId: inv.userId }, inv.field('username')));
+}
+
+async function handleVerificationButton(deps: BotDeps, inv: ButtonInvocation, kind: string, id: string | undefined, lang: Lang): Promise<void> {
+  if (!inv.guildId) return inv.update({ content: t(lang, 'guild_only') });
+  const ctx = { deps, guildId: inv.guildId, userId: inv.userId };
+  if (kind === 'vt') {                                                  // the public panel button: never edit the panel itself
+    const known = (await getGlobalLinkForUser(deps.db, inv.userId)) ?? (await getPendingAttemptForUser(deps.db, inv.userId, (deps.now ?? (() => new Date()))()));
+    if (!known && inv.showModal) return inv.showModal({ id: 'vm:open', title: t(lang, 'vt_modal_title'), fieldId: 'username', label: t(lang, 'vt_modal_label'), maxLength: 40 });
+    await inv.deferReply?.();
+    return (inv.reply ?? inv.update)(await openTicket(ctx, undefined));
+  }
+  await inv.deferUpdate?.();
+  if (!id) return inv.update({ content: t(lang, 'vt_gone') });
+  return inv.update(kind === 'vc' ? await checkTicket(ctx, id) : kind === 'vn' ? await newCode(ctx, id) : await closeTicket(ctx, id));
+}
+
 export async function handleButton(deps: BotDeps, inv: ButtonInvocation): Promise<void> {
   const nowMs = (deps.now ?? (() => new Date()))().getTime();
   sweep(nowMs);
   const [kind, tk] = inv.customId.split(':');
   const lang: Lang = inv.guildId ? (await getGuildConfig(deps.db, inv.guildId))?.language ?? 'en' : 'en';
+  if (kind === 'vt' || kind === 'vc' || kind === 'vn' || kind === 'vx') return handleVerificationButton(deps, inv, kind, tk, lang);
   const p = tk ? pending.get(tk) : undefined;
   if (!inv.guildId || !p || p.expires < nowMs) return inv.update({ content: t(lang, 'link_expired') });
 
@@ -264,7 +273,9 @@ export async function handleButton(deps: BotDeps, inv: ButtonInvocation): Promis
   }
   if (kind === 'ul' && p.kind === 'unlink') {
     pending.delete(tk!);
-    const removed = await unlinkWithRoles(deps.db, { guildId: inv.guildId, actorId: p.userId, discordUserId: p.userId, action: 'link.unlinked_self' });
+    const global = await unlinkGlobalSelf(deps.db, { discordUserId: p.userId, guildId: inv.guildId });      // ends the link in EVERY server (audited per server)
+    if (global) { let n = 0; for (const g of global.guilds) n += await removeGrantedRoles(deps, g.guildId, p.userId, g.managedRoleIds); return inv.update({ content: t(lang, 'unlink_self_done', { n }) }); }
+    const removed = await unlinkWithRoles(deps.db, { guildId: inv.guildId, actorId: p.userId, discordUserId: p.userId, action: 'link.unlinked_self' });   // legacy pending claim only
     if (!removed.length) return inv.update({ content: t(lang, 'unlink_self_none') });
     const n = await removeGrantedRoles(deps, inv.guildId, p.userId, removed.flatMap((x) => x.managedRoleIds));
     return inv.update({ content: t(lang, 'unlink_self_done', { n }) });
@@ -273,13 +284,11 @@ export async function handleButton(deps: BotDeps, inv: ButtonInvocation): Promis
     if (!inv.canManageGuild) return inv.update({ content: t(lang, 'not_admin') }); // re-checked at click time
     pending.delete(tk!);
     const r = await forceLink(deps.db, { guildId: inv.guildId, adminId: p.adminId, discordUserId: p.targetUserId, playerId: p.playerId, username: p.username, replace: p.replace, ...(p.reason ? { reason: p.reason } : {}) });
-    if (!r.ok) return inv.update({ content: t(lang, 'force_conflict') });
+    if (!r.ok) return inv.update({ content: t(lang, r.code === 'GLOBAL_CONFLICT' ? 'vt_player_taken' : 'force_conflict') });
+    for (const d of r.displaced) for (const g of d.guilds) await removeGrantedRoles(deps, g.guildId, d.discordUserId, g.managedRoleIds);
     return inv.update({ content: t(lang, 'force_done', { user: p.targetUserId, name: p.username ?? p.playerId }) });
   }
   return inv.update({ content: t(lang, 'link_expired') });
 }
 
-function syncDeps(deps: BotDeps): GuildSyncDeps {
-  return { db: deps.db, game: deps.game, discord: deps.discord, ...(deps.now ? { now: deps.now } : {}), ...(deps.log ? { log: deps.log } : {}) };
-}
 export type { MsgKey };

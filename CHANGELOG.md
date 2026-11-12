@@ -1,3 +1,49 @@
+# CHANGELOG — Phase 1: global account linking + company-name verification tickets
+
+**Base:** the repository as uploaded after the dashboard hotfix (`AoN-role-bot-main (2).zip`; it has no `.git`, so no commit hash can be stated — please note your current commit when you apply this). **Migration:** `0009_global_links_verification.sql` runs automatically at bot start (forward-only, additive, preserves every existing link; conflicts are unlinked with an audit event, never deleted). No new environment variables. After deploying, re-register slash commands (the bot does this at start) so `/verify` and `/admin verify-panel` appear.
+
+## What it does
+* **Global links.** `global_links` (unique per Discord user and per game account, enforced by partial unique indexes) is the identity. Per-server `account_links` rows stay for sync state; a DB trigger forbids an active one that disagrees with the global link. Verify once; in another server the link is created on the member's first explicit use (`/sync me`, `/profile`, `/link-status`, `/verify`, panel button) with no second ownership check.
+* **Company-name verification.** Ticket shows a one-time code `AON-XXXXXXXXXX`; the member puts it in the name of one of their own companies; **Check verification** reads `GET /players/{id}/companies?limit=50&offset=N` (paginated) and looks for the code. Only a hash of the code is stored; 30-minute expiry; 10 checks / 20 s apart / 8 tickets per day; owner-only buttons; double-click and cross-member races produce exactly one link (tested). `/link` is now an alias of `/verify`; the name-only claim is removed.
+* **Ticket UX (AR/EN):** panel with *Open verification ticket*, name modal, instructions + code, *Check verification*, *New code*, *Close ticket*, clear messages for success / wrong code / expired / locked / API down / unreadable data / already linked.
+* **Dashboard:** new **Verification** tab: channel selector (validated against Discord: text channels of this server only), 30-day statistics, linked members by method, recent attempts. `/admin verify-panel` posts the panel into that channel.
+* **Admin/operator controls:** server `/admin unlink` is server-level; `/unlink` by the member ends the link everywhere; a proven link cannot be broken by `/force link` (409 `global_conflict`); a real proof replaces an unproven (legacy/staff/forced) link and strips the old claimant's roles; operator recovery `scripts/recover-link.ts` (reason mandatory, audited).
+* Design, decisions and limits: `docs/VERIFICATION.md`. Checklist: `PROJECT_STATUS.md`.
+
+## Existing behaviour changed (on purpose)
+* A game account can no longer be linked to different Discord users in different servers, and one Discord user can no longer hold different accounts in different servers. Existing conflicting links are resolved by migration 0009 (strongest/oldest kept; the others set to `unlinked` + audit `link.migration_conflict_unlinked`; roles they granted stay until removed by hand).
+* Old name-only links stay valid, marked `legacy_unverified`, until the real owner verifies (then they are replaced) .
+* `forceLink` returns `displaced` and may refuse with `GLOBAL_CONFLICT`; the member's own `/unlink` is global.
+* Five existing tests were rewritten for these rules (db: direct-link independence per guild, relink after unlink, force-link result, migration lists; sync: cross-guild test now uses one member in two servers; bot: the removed name-only `/link` tests replaced by ticket-flow tests; web: nav count 9→10).
+* Also fixed: a cooldown map treated a clock moving backwards as "on cooldown".
+* Includes the one-file typing fix for `dashboard-resilience.test.ts` from the previous message (already in this file; do not apply that ZIP separately).
+
+## Tests actually run (sandbox)
+| Suite | Backend | Result |
+|---|---|---|
+| `tsc --noEmit` core, client, db, sync, bot, web | – | all exit 0 |
+| core (91) · client (66) | pure | all passed |
+| db (107) | PGlite | 107 passed |
+| db (107) | **real PostgreSQL 16** | 107 passed (incl. concurrency/race tests, migration with conflicting legacy data) |
+| sync (81) | PGlite and PostgreSQL 16 | 81 passed on both |
+| bot (90, mocked Discord and game API) | PGlite and PostgreSQL 16 | 90 passed on both |
+| web API/auth/setup/verification/resilience (115) + UI (72, jsdom) | PGlite | 187 passed |
+| web API/auth/setup/verification (102) | PostgreSQL 16 | 102 passed |
+
+**Not run:** real Discord (the discord.js adapters `interactions.ts`/`main.ts` and the panel/modal were never exercised against Discord), the live game API, a real browser, the production host, Docker, your production database.
+
+## Known limitations and unverified assumptions
+* **The `/players/{id}/companies` response shape is unverified** (free-form in the OpenAPI file, no sample). Parsing is strict and fails closed; see `docs/VERIFICATION.md`. Run `scripts/probe-api.sh` and send `api-samples/player_companies.json` to confirm.
+* Whether companies can be renamed freely in the game (length/characters) is assumed; the code is 14 characters.
+* Per-server link on first explicit use, not on join (no privileged intent).
+* No interactive admin review queue yet (history + force/unlink + operator script).
+
+## Changed / new files
+New: `docs/VERIFICATION.md`, `scripts/recover-link.ts`, `packages/db/migrations/0009_global_links_verification.sql`, `packages/db/src/{global-links-repo,verification-repo}.ts`, `packages/core/src/verification.ts`, `packages/bot/src/{verification,shared}.ts`, tests: `core/test/verification.test.ts`, `aon-client/test/companies.test.ts`, `db/test/verification.test.ts`, `bot/test/verification.test.ts`, `web/test/verification-api.test.ts`.
+Modified: `PROJECT_STATUS.md`, `docs/LINKING.md`, `scripts/probe-api.sh`, `core/src/index.ts`, `aon-client/src/{client,mappers}.ts`, `db/src/{guild-repo,index,links-repo}.ts`, `bot/src/{commands,handlers,interactions,main,messages}.ts`, `web/src/{app,discord}.ts`, `web/public/{app,common,i18n}.js`, tests `bot/test/{bot-harness,handlers.test}.ts`, `db/test/{features,migrate,repos}.test.ts`, `sync/test/guild-sync.test.ts`, `web/test/{dashboard-resilience,harness,ui}.test.ts`.
+
+---
+
 # CHANGELOG — Incident fix: `/app` stuck on the loading skeleton (hotfix, front-end only)
 
 **Base:** the uploaded `AoN-role-bot-main.zip` (it contains no `.git` metadata, so the exact commit could not be read from it; the files match Delivery 2 + Delivery 4 with Delivery 3's three front-end files missing). Extract over the project. **No migration, no new environment variable, no backend change, no files deleted.** Restart is not required (static files), but browsers may keep the old scripts for up to 5 minutes (`cache-control: max-age=300`) — hard-refresh once.

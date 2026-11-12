@@ -3,7 +3,9 @@ import { PermissionFlagsBits, SlashCommandBuilder, type RESTPostAPIChatInputAppl
 /** NOTE: Arabic is not a supported Discord command-localisation locale, so command descriptions are English; all replies follow the server language.
  * Discord has no "/sync all" style spaces: these are command + subcommand pairs, which render the same way. */
 export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody[] {
-  const link = new SlashCommandBuilder().setName('link').setDescription('Link your Age of Nations account').setDMPermission(false)
+  const link = new SlashCommandBuilder().setName('link').setDescription('Link your Age of Nations account (starts verification)').setDMPermission(false)
+    .addStringOption((o) => o.setName('username').setDescription('Your Age of Nations username').setRequired(true).setMaxLength(40));
+  const verify = new SlashCommandBuilder().setName('verify').setDescription('Verify and link your Age of Nations account').setDMPermission(false)
     .addStringOption((o) => o.setName('username').setDescription('Your Age of Nations username').setRequired(true).setMaxLength(40));
   const unlink = new SlashCommandBuilder().setName('unlink').setDescription('Remove the link to your game account').setDMPermission(false);
   const linkStatus = new SlashCommandBuilder().setName('link-status').setDescription('Show your link status').setDMPermission(false);
@@ -25,7 +27,8 @@ export function buildCommands(): RESTPostAPIChatInputApplicationCommandsJSONBody
     .addSubcommand((s) => s.setName('approve').setDescription('Approve a link request').addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true)).addStringOption((o) => o.setName('reason').setDescription('Note').setMaxLength(200)))
     .addSubcommand((s) => s.setName('reject').setDescription('Reject a link request').addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true)).addStringOption((o) => o.setName('reason').setDescription('Note').setMaxLength(200)))
     .addSubcommand((s) => s.setName('unlink').setDescription('Remove a member\'s link').addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true)))
+    .addSubcommand((s) => s.setName('verify-panel').setDescription('Post the verification ticket panel in the configured channel'))
     .addSubcommand((s) => s.setName('diagnostics').setDescription('Show bot status for this server'));
   const help = new SlashCommandBuilder().setName('help').setDescription('How to use this bot');
-  return [link, unlink, linkStatus, profile, sync, force, admin, help].map((c) => c.toJSON());
+  return [link, verify, unlink, linkStatus, profile, sync, force, admin, help].map((c) => c.toJSON());
 }
