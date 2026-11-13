@@ -5,10 +5,10 @@ import {
   claimLink, ensureGuild, ensureGuildLink, findLinkForUser, forceLink, getGlobalLinkForUser, unlinkGlobalSelf, getGuildConfig, getLadder, listActiveLinks, listPendingLinks, listRoleMappings, reviewLink, unlinkWithRoles,
   getPendingAttemptForUser, audit, type Db,
 } from '@aon/db';
-import { syncGuild, syncOneUser, type DiscordGateway, type GameData, type GuildSyncDeps, type UserSyncResult } from '@aon/sync';
+import { publishVerificationPanel, syncGuild, syncOneUser, type DiscordGateway, type PanelPublisher, type GameData, type GuildSyncDeps, type UserSyncResult } from '@aon/sync';
 import { t, type Lang, type MsgKey } from './messages.js';
 import { buildProfileEmbed, type EmbedJson } from './profile-card.js';
-import { checkTicket, closeTicket, newCode, openTicket, panelReply } from './verification.js';
+import { checkTicket, closeTicket, newCode, openTicket } from './verification.js';
 import { describeSync, esc, gameFailure, removeGrantedRoles, syncDeps } from './shared.js';
 
 export interface Reply { content: string; buttons?: { id: string; label: string; primary?: boolean }[]; embed?: EmbedJson }
@@ -52,8 +52,8 @@ export interface BotDeps {
     /** All companies of a player (`GET /players/{id}/companies`, paginated by the client). The proof of ownership is read from here only. */
     playerCompanies(id: string): Promise<Fetched<{ companies: { id: string | null; name: string }[] }>>;
   };
-  /** Posts the verification panel into a channel of that server (supplied by the Discord adapter; absent in tests that do not need it). */
-  postPanel?: (guildId: string, channelId: string, panel: Reply) => Promise<void>;
+  /** Posts / edits / removes the verification panel message (supplied by the Discord adapter; absent in tests that do not need it). Shared with the dashboard. */
+  panelPublisher?: PanelPublisher;
   verifier?: OwnershipVerifier;
   /** Where relative avatar paths live (UNVERIFIED assumption about the game's media host; configurable). */
   mediaBaseUrl?: string;
@@ -107,14 +107,16 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
       await inv.defer();
       return inv.reply(await openTicket({ deps, guildId: inv.guildId, userId: inv.userId }, inv.str('username')));
     }
-    case 'admin/verify-panel': {
+    case 'admin/verify-panel': {          // same implementation as the dashboard's "Publish" button (publishVerificationPanel)
       if (!(await needAdmin())) return;
-      const ch = cfg.verificationChannelId;
-      if (!ch) return inv.reply({ content: t(lang, 'vt_no_channel') });
-      try { if (!deps.postPanel) throw new Error('no adapter'); await deps.postPanel(inv.guildId, ch, panelReply(lang)); }
-      catch { return inv.reply({ content: t(lang, 'vt_panel_failed', { ch }) }); }
-      await audit(deps.db, { guildId: inv.guildId, actor: inv.userId, action: 'verification.panel_posted', target: ch });
-      return inv.reply({ content: t(lang, 'vt_panel_posted', { ch }) });
+      await inv.defer();
+      const r = await publishVerificationPanel({ db: deps.db, publisher: deps.panelPublisher, ...(deps.now ? { now: deps.now } : {}), ...(deps.log ? { log: deps.log } : {}) }, { guildId: inv.guildId, actorId: inv.userId, source: 'command' });
+      const ch = cfg.verificationChannelId ?? '';
+      if (r.ok) return inv.reply({ content: t(lang, r.action === 'edited' ? 'vt_panel_updated' : 'vt_panel_posted', { ch: r.channelId }) });
+      if (r.code === 'no_channel') return inv.reply({ content: t(lang, 'vt_no_channel') });
+      if (r.code === 'busy') return inv.reply({ content: t(lang, 'vt_panel_busy') });
+      if (r.code === 'missing_permissions' && r.missing?.length) return inv.reply({ content: t(lang, 'vt_panel_perms', { ch, perms: r.missing.join(', ') }) });
+      return inv.reply({ content: t(lang, 'vt_panel_failed', { ch }) });
     }
     case 'unlink/unlink': {
       const mine = await findLinkForUser(deps.db, inv.guildId, inv.userId);

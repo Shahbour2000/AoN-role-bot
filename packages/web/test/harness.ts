@@ -2,7 +2,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import type { Fetched } from '@aon/core';
+import type { Fetched, PanelMessage } from '@aon/core';
+import { PanelPublishError, type PanelPublisher } from '@aon/sync';
 import { ensureGuild, type Db } from '@aon/db';
 import { freshDb } from '../../db/test/helpers.js';
 import { DiscordAuthError, buildApp, pkceChallenge, type DiscordBotRest, type DiscordGuildInfo, type DiscordOAuth, type DiscordRole, type WebConfig, type WebDeps } from '../src/index.js';
@@ -51,7 +52,15 @@ export class FakeBotRest implements DiscordBotRest {
 }
 export const role = (id: string, position: number, over: Partial<DiscordRole> = {}): DiscordRole => ({ id, name: `role-${id}`, position, managed: false, color: 0, permissions: '0', ...over });
 
-export interface Ctx { unlinked: [string, string, string[]][]; app: FastifyInstance; db: Db; oauth: FakeOAuth; bot: FakeBotRest; clock: { now: Date }; syncCalls: [string, string][]; logs: string[]; pub: string; game: FakeGameWeb }
+/** Fake Discord side of the panel: remembers messages per channel and lets a test inject failures. Never touches the network. */
+export class FakePanelPublisher implements PanelPublisher {
+  n = 0; messages = new Map<string, { guildId: string; channelId: string; message: PanelMessage }>(); calls: string[] = [];
+  failWith: PanelPublishError | null = null; gate: Promise<void> | null = null;
+  async post(guildId: string, channelId: string, message: PanelMessage) { this.calls.push(`post:${guildId}:${channelId}`); if (this.gate) await this.gate; if (this.failWith) throw this.failWith; const id = `9000${++this.n}`; this.messages.set(id, { guildId, channelId, message }); return { messageId: id }; }
+  async edit(guildId: string, channelId: string, id: string, message: PanelMessage) { this.calls.push(`edit:${id}`); if (this.failWith) throw this.failWith; const m = this.messages.get(id); if (!m || m.channelId !== channelId || m.guildId !== guildId) return false; m.message = message; return true; }
+  async remove(_g: string, _c: string, id: string) { this.calls.push(`remove:${id}`); this.messages.delete(id); }
+}
+export interface Ctx { panel: FakePanelPublisher; unlinked: [string, string, string[]][]; app: FastifyInstance; db: Db; oauth: FakeOAuth; bot: FakeBotRest; clock: { now: Date }; syncCalls: [string, string][]; logs: string[]; pub: string; game: FakeGameWeb }
 export class FakeGameWeb {
   player: Fetched<{ id: string; username: string | null }> = { status: 'ok', data: { id: 'usr_p1', username: 'Alpha' } };
   parties: Fetched<never[]> = { status: 'ok', data: [] };
@@ -69,16 +78,16 @@ export class FakeGameWeb {
   async entityName(t: string, id: string) { this.calls.push(`name:${t}:${id}`); return this.names[`${t}:${id}`] ?? ({ status: 'incomplete', missing: ['name'] } as never); }
 }
 
-export async function makeApp(over: { cfg?: Partial<WebConfig>; guilds?: string[]; publicDir?: string } = {}): Promise<Ctx> {
+export async function makeApp(over: { cfg?: Partial<WebConfig>; guilds?: string[]; publicDir?: string; noPanelPublisher?: boolean } = {}): Promise<Ctx> {
   const db = await freshDb();
   for (const g of over.guilds ?? ['100000001', '100000002']) await ensureGuild(db, g, `Guild ${g}`);
-  const oauth = new FakeOAuth(); const bot = new FakeBotRest(); const game = new FakeGameWeb();
+  const oauth = new FakeOAuth(); const bot = new FakeBotRest(); const game = new FakeGameWeb(); const panel = new FakePanelPublisher();
   const clock = { now: new Date('2026-10-17T12:00:00Z') };
   const syncCalls: [string, string][] = []; const logs: string[] = []; const unlinked: [string, string, string[]][] = [];
   const pub = mkdtempSync(join(tmpdir(), 'aonpub-'));
   writeFileSync(join(pub, 'landing.html'), '<h1>landing</h1>'); writeFileSync(join(pub, 'app.html'), '<h1>app</h1>'); writeFileSync(join(pub, 'x.css'), 'body{}'); writeFileSync(join(pub, 'x.exe'), 'nope');
-  const deps: WebDeps = { db, cfg: cfgOf(over.cfg), oauth, botRest: bot, game: game as never, runSync: async (g, a) => { syncCalls.push([g, a]); }, onUnlinked: async (g, u, roles) => { unlinked.push([g, u, roles]); }, now: () => clock.now, log: (m) => logs.push(m), publicDir: over.publicDir ?? pub };
-  return { app: await buildApp(deps), db, oauth, bot, clock, syncCalls, logs, pub, game, unlinked };
+  const deps: WebDeps = { db, cfg: cfgOf(over.cfg), oauth, botRest: bot, ...(over.noPanelPublisher ? {} : { panelPublisher: panel }), game: game as never, runSync: async (g, a) => { syncCalls.push([g, a]); }, onUnlinked: async (g, u, roles) => { unlinked.push([g, u, roles]); }, now: () => clock.now, log: (m) => logs.push(m), publicDir: over.publicDir ?? pub };
+  return { panel, app: await buildApp(deps), db, oauth, bot, clock, syncCalls, logs, pub, game, unlinked };
 }
 
 export interface Login { cookies: Record<string, string>; csrf: string; headers: Record<string, string> }

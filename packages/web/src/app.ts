@@ -3,13 +3,14 @@ import { extname, join, normalize } from 'node:path';
 import fastifyCookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { MODULES_BY_TYPE, ENTITY_BY_TYPE, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, type Fetched } from '@aon/core';
+import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched } from '@aon/core';
 import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
   getSyncStatus, listAudit, listLinksDetailed, listRoleMappings, listSyncJobs, removeRoleMapping, reviewLink, saveLadder, updateGuildSettings, DEFAULT_LADDER_SEED, type Db,
-  verificationStats,
+  verificationStats, getPanel, savePanelSettings,
 } from '@aon/db';
+import { publishVerificationPanel, type PanelPublisher } from '@aon/sync';
 import type { WebConfig } from './config.js';
 import { open, pkceChallenge, randomToken, safeEqual, seal, sha256 } from './crypto.js';
 import { DiscordAuthError, type DiscordBotRest, type DiscordGuildInfo, type DiscordOAuth } from './discord.js';
@@ -30,6 +31,8 @@ export interface WebDeps {
   runSync(guildId: string, actorId: string): Promise<unknown>;
   /** Called after a member was unlinked from the dashboard: take the roles the bot had granted off them (best effort). */
   onUnlinked?(guildId: string, discordUserId: string, roleIds: string[]): Promise<void>;
+  /** Posts / edits the verification panel in Discord (same adapter the `/admin verify-panel` command uses). Absent => publishing answers `publisher_unavailable`. */
+  panelPublisher?: PanelPublisher;
   health?(): Promise<{ database: boolean; discord: boolean; gameApi: Record<string, number | null> | null }>;
   now?: () => Date; log?: (m: string) => void; publicDir?: string;
 }
@@ -304,6 +307,51 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const a = await guard(req, reply); if (!a) return;
     const [stats, cfg] = await Promise.all([verificationStats(db, a.guildId, clock()), getGuildConfig(db, a.guildId)]);
     return { channelId: cfg?.verificationChannelId ?? null, ...stats };
+  });
+
+  // ------------------------------------------------------------------ verification panel (customise + publish)
+  /** Everything the panel editor needs: stored settings, the effective message (defaults resolved), what is live in Discord and whether it is out of date. */
+  const panelView = async (guildId: string) => {
+    const [rec, cfgG] = await Promise.all([getPanel(db, guildId), getGuildConfig(db, guildId)]);
+    const lang = cfgG?.language ?? 'en'; const msg = resolvePanel(rec.settings, lang); const channelId = cfgG?.verificationChannelId ?? null;
+    const pub = rec.published;
+    return {
+      settings: rec.settings, preview: msg, channelId, canPublish: !!deps.panelPublisher,
+      published: pub ? { channelId: pub.channelId, messageId: pub.messageId, publishedAt: pub.publishedAt, publishedBy: pub.publishedBy, url: `https://discord.com/channels/${guildId}/${pub.channelId}/${pub.messageId}`,
+        upToDate: !!channelId && pub.fingerprint === panelFingerprint(channelId, msg) } : null,
+      defaults: { en: PANEL_DEFAULTS.en, ar: PANEL_DEFAULTS.ar, color: DEFAULT_PANEL_COLOR, style: 'primary' }, limits: PANEL_LIMITS, styles: PANEL_BUTTON_STYLES, serverLanguage: lang,
+    };
+  };
+  app.get('/api/guilds/:guildId/verification/panel', async (req, reply) => { const a = await guard(req, reply); if (!a) return; return panelView(a.guildId); });
+  app.put('/api/guilds/:guildId/verification/panel', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const body = z.record(z.unknown()).safeParse(req.body ?? {});
+    if (!body.success) return fail(reply, 422, 'validation', { issues: [] });
+    const v = validatePanelInput(body.data);                                  // semantic rules live in @aon/core (shared with the bot and the database checks)
+    if (!v.ok) return fail(reply, 422, 'validation', { issues: v.issues });
+    await savePanelSettings(db, a.guildId, v.value, a.session.discordUserId, clock());
+    return panelView(a.guildId);
+  });
+  app.post('/api/guilds/:guildId/verification/panel/publish', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const p = z.object({ mode: z.enum(['update', 'new']).optional() }).strict().safeParse(req.body ?? {});
+    if (!p.success) return fail(reply, 422, 'validation', { issues: [] });
+    const chId = (await getGuildConfig(db, a.guildId))?.verificationChannelId;
+    if (!chId) return fail(reply, 409, 'no_channel');
+    const chans = await deps.botRest.listChannels(a.guildId);                // the configured channel must still exist AND belong to this server
+    if (chans && !chans.some((c) => c.id === chId && TEXT_CHANNEL.has(c.type))) return fail(reply, 422, 'invalid_channel');
+    const r = await publishVerificationPanel({ db, publisher: deps.panelPublisher, now: clock, ...(deps.log ? { log: deps.log } : {}) }, { guildId: a.guildId, actorId: a.session.discordUserId, source: 'dashboard', ...(p.data.mode ? { mode: p.data.mode } : {}) });
+    if (!r.ok) {
+      switch (r.code) {
+        case 'no_channel': return fail(reply, 409, 'no_channel');
+        case 'busy': return fail(reply, 409, 'busy');
+        case 'publisher_unavailable': return fail(reply, 503, 'publisher_unavailable');
+        case 'missing_permissions': return fail(reply, 422, 'bot_missing_permissions', { missing: r.missing ?? [] });
+        case 'channel_unavailable': return fail(reply, 422, 'invalid_channel');
+        default: return fail(reply, 502, 'discord_error');
+      }
+    }
+    return { result: { action: r.action, channelId: r.channelId, messageId: r.messageId, url: `https://discord.com/channels/${a.guildId}/${r.channelId}/${r.messageId}`, removedOld: r.removedOld }, panel: await panelView(a.guildId) };
   });
 
   // ------------------------------------------------------------------ military ranks

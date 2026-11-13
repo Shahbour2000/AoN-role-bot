@@ -8,3 +8,4 @@ export * from './pg.js';
 export * from './sessions-repo.js';
 export * from './global-links-repo.js';
 export * from './verification-repo.js';
+export * from './panel-repo.js';

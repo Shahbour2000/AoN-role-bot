@@ -1,3 +1,19 @@
+# Changelog
+
+## Delivery A — customizable verification ticket panel, publishable from the dashboard
+**Added**
+- Panel settings (title, description, colour, footer, thumbnail link, button text/emoji/colour, default-text language), stored per server in `verification_panels` (migration `0010`, additive).
+- Dashboard: panel editor with live preview, save, reset, publish / update / post-as-new, status ("published in #channel", "up to date" or "changed since publishing", link to the message). Arabic + English, RTL.
+- API: `GET/PUT /api/guilds/:g/verification/panel`, `POST .../panel/publish`.
+- `@aon/core` `panel.ts` (validation, defaults, fingerprint), `@aon/db` `panel-repo.ts`, `@aon/sync` `panel.ts` (one publish service), `@aon/bot` `panel-publisher.ts` (discord.js adapter).
+**Changed**
+- `/admin verify-panel` now runs the same service as the dashboard (edits the existing message instead of posting a duplicate). The bot's `postPanel` hook is replaced by `panelPublisher`; messages `vt_panel`/`vt_open_btn` removed (defaults live in core); new `vt_panel_updated/busy/perms`.
+- Verification page: the channel hint no longer tells admins to run a slash command.
+**Fixed (found by the new tests)**
+- Removing an old panel from a channel that no longer exists is silent instead of an error.
+- A failed/malformed panel response can no longer break the rest of the Verification page.
+**Unchanged:** global linking, company-name verification, ticket flow and its security checks, every other dashboard page.
+
 # CHANGELOG — Phase 1: global account linking + company-name verification tickets
 
 **Base:** the repository as uploaded after the dashboard hotfix (`AoN-role-bot-main (2).zip`; it has no `.git`, so no commit hash can be stated — please note your current commit when you apply this). **Migration:** `0009_global_links_verification.sql` runs automatically at bot start (forward-only, additive, preserves every existing link; conflicts are unlinked with an audit event, never deleted). No new environment variables. After deploying, re-register slash commands (the bot does this at start) so `/verify` and `/admin verify-panel` appear.

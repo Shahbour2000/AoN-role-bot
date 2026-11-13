@@ -53,6 +53,33 @@ send `api-samples/player_companies.json`; if the shape differs only `extractComp
 
 ## Decisions taken (change on request)
 * The ticket is an ephemeral Discord message flow with state in the database, not a private thread/channel: it needs no extra Discord permissions.
-  The "ticket channel" is where the panel is posted (`/admin verify-panel`). Staff-visible ticket threads can be added later.
+  The "ticket channel" is where the panel is posted (dashboard **Publish** button or `/admin verify-panel`). Staff-visible ticket threads can be added later.
 * Per-server membership appears on first explicit use (no privileged intent). A `GuildMembers` intent would allow doing it on join.
 * Legacy name-only links remain valid (marked `legacy_unverified`) until their owner is replaced by a real proof or they re-verify.
+
+
+## The ticket panel: customise and publish from the dashboard
+The public panel message (one embed + one button) is configured and published on the dashboard's **Verification** page. `/admin verify-panel` still works and runs the **same code**
+(`publishVerificationPanel` in `@aon/sync`), so both paths produce the same message, the same duplicate protection and the same audit entry (`details.source` = `dashboard` or `command`).
+
+| Setting | Rules |
+|---|---|
+| Embed title / description / footer | optional; blank = built-in default in the server (or panel) language; 256 / 4000 / 2048 characters; no control characters |
+| Embed colour | `#RRGGBB`; default `#6D5DFB` |
+| Thumbnail link | optional; `https://` only, no credentials. (The dashboard preview shows a placeholder: its CSP does not load external images; Discord shows the real image.) |
+| Button text / emoji / colour | text up to 80 characters; one Unicode emoji or a custom emoji `<:name:id>` / `<a:name:id>`; blue, gray, green or red |
+| Language of the default texts | server language, Arabic or English |
+
+**What can never be configured:** the button's custom id (`vt:open`, fixed in `@aon/core`), link buttons, mentions (every panel message is sent with mentions disabled). Whatever the look, a click goes through the same
+ticket flow and checks described above.
+
+**Publishing.** The destination is always the server's configured verification channel (the request cannot pick another channel). The channel is validated server-side: it must be a text/announcement channel
+of *this* server, and the bot needs View Channel, Send Messages and Embed Links there (a missing permission is reported by name). The bot remembers the message it posted (`verification_panels`):
+* **Publish / Update** edits that message in place, so no duplicate appears; if it was deleted in Discord, a new one is posted.
+* **Post as a new message** posts a fresh panel, then removes the old one (new first, so there is never a moment without a working panel).
+* Changing the channel and publishing moves the panel (new channel first, old message removed afterwards, best effort).
+* The page shows *Published in #channel*, an *Open in Discord* link, and whether the live message is *up to date* or *changed since publishing* (fingerprint of channel + content).
+* Two simultaneous publishes in one server: one runs, the other gets "busy" (in-process lock; the bot runs as one process).
+* A panel posted **before** this version by `/admin verify-panel` is not tracked: the first dashboard publish posts a new one; delete the old message by hand. The old button keeps working.
+
+Permissions: dashboard = same gate as every other settings route (Discord owner / Administrator / Manage Server, re-read from Discord, CSRF + same-origin on writes, per-session write rate limit). Trusted bot-administrator roles come in a later phase and will plug into this same gate.

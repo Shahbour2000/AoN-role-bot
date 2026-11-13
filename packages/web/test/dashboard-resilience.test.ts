@@ -132,6 +132,22 @@ describe('verification page', () => {
     const put = calls.find((c) => c.method === 'PUT')!; expect(JSON.parse(put.body!)).toEqual({ verificationChannelId: '700003' });
     expect(w.document.querySelectorAll('#nav a').length).toBe(10);
   });
+  it('a failing or malformed panel-editor response leaves statistics, channel selector and history working (only the editor shows a notice)', async () => {
+    for (const panelRes of [() => bad(503, 'discord_unavailable'), () => ok({}), () => ok({ settings: {}, defaults: {}, limits: {}, styles: 'x' })]) {
+      const f: Fetch = async (u) => {
+        if (u.startsWith('/api/session')) return ok(SESSION);
+        if (u.startsWith('/api/guilds') && !u.includes('/api/guilds/')) return ok({ guilds: [{ id: GID, name: 'G', icon: null, installed: true }] });
+        if (u.endsWith('/verification/panel')) return panelRes();
+        if (u.endsWith('/verification')) return ok(data);
+        if (u.endsWith('/channels')) return ok({ channels: [{ id: '700001', name: 'verify-here' }] });
+        return ok({});
+      };
+      const { root, settle } = await openApp(f, { hash: `#/g/${GID}/verify` });
+      await settle(() => !!root.querySelector('#pn-unavailable'));
+      expect(root.querySelector('#pn-unavailable')).not.toBeNull(); expect(root.querySelector('#vf-save')).not.toBeNull(); expect(root.querySelectorAll('.stat').length).toBe(4); expect(root.querySelector('#pn-card')).toBeNull();
+      expect(root.textContent).not.toMatch(/\b(pn_|vf_|e_)[a-z_]+\b/);
+    }
+  });
   it('a failing statistics request ends in an error panel with Retry', async () => {
     const f: Fetch = async (u) => (u.startsWith('/api/session') ? ok(SESSION) : u.endsWith('/verification') ? bad(503, 'discord_unavailable') : u.endsWith('/channels') ? ok({ channels: [] }) : ok({ guilds: [{ id: GID, name: 'G', icon: null, installed: true }] }));
     const { root, settle } = await openApp(f, { hash: `#/g/${GID}/verify` });

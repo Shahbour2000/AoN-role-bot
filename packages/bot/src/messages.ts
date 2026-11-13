@@ -48,8 +48,7 @@ const M = {
     profile_pending: 'The link request is still waiting for moderator approval.', profile_player_missing: 'The linked game account could not be found (it may have been deleted). Your link was kept.',
 
 
-    vt_panel: '**Account verification**\nLink your Age of Nations account to your Discord account. You prove it is yours by temporarily putting a one-time code in the name of one of your own companies. Press the button to open your ticket.',
-    vt_open_btn: 'Open verification ticket', vt_check_btn: 'Check verification', vt_new_btn: 'New code', vt_close_btn: 'Close ticket',
+    vt_check_btn: 'Check verification', vt_new_btn: 'New code', vt_close_btn: 'Close ticket',
     vt_modal_title: 'Verify your account', vt_modal_label: 'Your Age of Nations username',
     vt_instructions: '**Verification ticket**\nAccount: **{name}** (ID `{id}`)\n\n**1.** In Age of Nations, rename one of **your own companies** so that its name contains this code:\n`{code}`\n**2.** Press **Check verification** (the game API refreshes about every 30 seconds).\n\nThe code works only for this ticket and expires {exp}. After you are verified you can restore the company name.',
     vt_existing: 'You already have an open ticket for **{name}**. For security the code is shown only once: press **New code** for a fresh one, **Check verification** if you already renamed a company, or **Close ticket**.',
@@ -66,7 +65,7 @@ const M = {
     vt_user_linked_other: 'Your Discord account is already linked to another game account (**{name}**). Run `/unlink` first if you want to change it.',
     vt_rate_limited: 'Too many verification attempts in the last 24 hours. Please try again later.',
     vt_failed_generic: 'Verification could not be completed. Nothing was changed.',
-    vt_panel_posted: 'The verification panel was posted in <#{ch}>.', vt_no_channel: 'Choose the verification channel in the dashboard (Server setup) first.', vt_panel_failed: 'I could not post in <#{ch}>. Check that the bot can view and send messages there.',
+    vt_panel_posted: 'The verification panel was posted in <#{ch}>.', vt_panel_updated: 'The verification panel in <#{ch}> was updated.', vt_panel_busy: 'A panel update is already running. Please wait a moment.', vt_panel_perms: 'I could not post in <#{ch}>. The bot is missing these permissions there: {perms}.', vt_no_channel: 'Choose the verification channel in the dashboard (Server setup) first.', vt_panel_failed: 'I could not post in <#{ch}>. Check that the bot can view and send messages there.',
     link_use_verify: 'Linking now requires proof that the game account is yours. Use `/verify username:<name>` or the verification ticket.',
     unlink_global_hint: 'This removes your link in **every** server that uses this bot.',
   },
@@ -118,8 +117,7 @@ const M = {
     profile_pending: 'طلب الربط لا يزال بانتظار موافقة المشرفين.', profile_player_missing: 'تعذّر العثور على حساب اللعبة المرتبط (ربما حُذف). تم الاحتفاظ بالربط.',
 
 
-    vt_panel: '**توثيق الحساب**\nاربط حسابك في Age of Nations بحساب ديسكورد. تثبت ملكيتك بوضع رمز لمرة واحدة مؤقتاً في اسم إحدى شركاتك. اضغط الزر لفتح تذكرتك.',
-    vt_open_btn: 'فتح تذكرة توثيق', vt_check_btn: 'تحقق من التوثيق', vt_new_btn: 'رمز جديد', vt_close_btn: 'إغلاق التذكرة',
+    vt_check_btn: 'تحقق من التوثيق', vt_new_btn: 'رمز جديد', vt_close_btn: 'إغلاق التذكرة',
     vt_modal_title: 'توثيق حسابك', vt_modal_label: 'اسم المستخدم في Age of Nations',
     vt_instructions: '**تذكرة التوثيق**\nالحساب: **{name}** (المعرّف `{id}`)\n\n**١.** في Age of Nations غيّر اسم إحدى **شركاتك أنت** ليحتوي على هذا الرمز:\n`{code}`\n**٢.** اضغط **تحقق من التوثيق** (يتجدد الـ API تقريباً كل 30 ثانية).\n\nالرمز صالح لهذه التذكرة فقط وينتهي {exp}. بعد التوثيق يمكنك إعادة اسم الشركة.',
     vt_existing: 'لديك تذكرة مفتوحة للحساب **{name}**. لأسباب أمنية يظهر الرمز مرة واحدة فقط: اضغط **رمز جديد** للحصول على رمز جديد، أو **تحقق من التوثيق** إن كنت قد غيّرت اسم شركة، أو **إغلاق التذكرة**.',
@@ -136,7 +134,7 @@ const M = {
     vt_user_linked_other: 'حساب ديسكورد مرتبط بحساب لعبة آخر (**{name}**). نفّذ `/unlink` أولاً إن أردت تغييره.',
     vt_rate_limited: 'محاولات توثيق كثيرة خلال آخر 24 ساعة. حاول لاحقاً.',
     vt_failed_generic: 'تعذّر إكمال التوثيق. لم يتم تغيير أي شيء.',
-    vt_panel_posted: 'تم نشر لوحة التوثيق في <#{ch}>.', vt_no_channel: 'اختر قناة التوثيق من لوحة التحكم (إعداد السيرفر) أولاً.', vt_panel_failed: 'تعذّر النشر في <#{ch}>. تأكد أن البوت يستطيع رؤية القناة وإرسال الرسائل فيها.',
+    vt_panel_posted: 'تم نشر لوحة التوثيق في <#{ch}>.', vt_panel_updated: 'تم تحديث لوحة التوثيق في <#{ch}>.', vt_panel_busy: 'هناك تحديث للوحة قيد التنفيذ. انتظر قليلاً.', vt_panel_perms: 'تعذّر النشر في <#{ch}>. ينقص البوت هذه الصلاحيات هناك: {perms}.', vt_no_channel: 'اختر قناة التوثيق من لوحة التحكم (إعداد السيرفر) أولاً.', vt_panel_failed: 'تعذّر النشر في <#{ch}>. تأكد أن البوت يستطيع رؤية القناة وإرسال الرسائل فيها.',
     link_use_verify: 'الربط يتطلب الآن إثبات أن حساب اللعبة لك. استخدم `/verify username:<الاسم>` أو تذكرة التوثيق.',
     unlink_global_hint: 'هذا يزيل ربطك في **كل** سيرفر يستخدم هذا البوت.',
   },

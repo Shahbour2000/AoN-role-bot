@@ -17,9 +17,6 @@ const ticketButtons = (lang: Lang, id: string): NonNullable<Reply['buttons']> =>
   { id: `vc:${id}`, label: t(lang, 'vt_check_btn'), primary: true }, { id: `vn:${id}`, label: t(lang, 'vt_new_btn') }, { id: `vx:${id}`, label: t(lang, 'vt_close_btn') },
 ];
 
-/** The message the administrator posts in the verification channel. */
-export const panelReply = (lang: Lang): Reply => ({ content: t(lang, 'vt_panel'), buttons: [{ id: 'vt:open', label: t(lang, 'vt_open_btn'), primary: true }] });
-
 async function syncNote(c: VerifyCtx, lang: Lang): Promise<string> {
   try {
     const s = await syncOneUser(syncDeps(c.deps), c.guildId, c.userId);

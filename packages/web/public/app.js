@@ -512,7 +512,7 @@
 
   // ---------------------------------------------------------------- verification tickets
   async function verifyPage(g) {
-    const [st, ch] = await Promise.all([api('GET', `/api/guilds/${g}/verification`), api('GET', `/api/guilds/${g}/channels`)]);
+    const [st, ch, pn] = await Promise.all([api('GET', `/api/guilds/${g}/verification`), api('GET', `/api/guilds/${g}/channels`), api('GET', `/api/guilds/${g}/verification/panel`)]);
     if (!st.ok) return [failPanel(errText(st), route)];
     const d = st.data; const n = (k) => fmtNum(d.last30d[k] ?? 0);
     const kpi = (ic, label, value) => el('div', { class: 'card stat' }, el('h3', {}, icon(ic), ' ', label), el('p', { text: value }));
@@ -531,10 +531,122 @@
       el('div', { class: 'stats' }, kpi('check', t('vf_verified'), n('verified')), kpi('clock', t('vf_pending'), n('pending')), kpi('close', t('vf_failed'), fmtNum((d.last30d.expired ?? 0) + (d.last30d.cancelled ?? 0) + (d.last30d.locked ?? 0))), kpi('link', t('vf_linked'), fmtNum(d.linkedMembers.total))),
       el('div', { class: 'card' }, el('h3', { text: t('vf_channel') }), el('p', { class: 'muted', text: t('vf_channel_hint') }),
         ch.ok ? field(t('vf_channel'), sel) : el('p', { class: 'err', text: t('vf_channels_unavailable') }), el('div', { class: 'row' }, ch.ok ? save : [])),
+      panelEditorSafe(g, pn, ch.ok ? ch.data.channels : [], sel, d.channelId),
       legacy ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('vf_legacy_note', { n: fmtNum(legacy) }) })) : null,
       el('h3', { text: t('vf_recent') }),
       rows.length ? el('div', { class: 'scroll' }, el('table', {}, el('thead', {}, el('tr', {}, [t('au_when'), t('vf_col_member'), t('vf_col_player'), t('vf_col_status'), t('vf_col_checks'), t('vf_col_result')].map((h) => el('th', { text: h })))), el('tbody', {}, rows))) : el('p', { class: 'muted', text: t('vf_none') }),
     ];
+  }
+
+
+  // The editor is an add-on to the statistics/channel page: a failed or malformed panel response must never take the rest of the page down.
+  function panelEditorSafe(g, pn, channels, channelSel, savedChannelId) {
+    const note = (msg) => el('div', { class: 'callout warn', role: 'alert', id: 'pn-unavailable' }, el('p', { text: msg }));
+    if (!pn.ok) return note(errText(pn));
+    const d = pn.data;
+    if (!d || !d.settings || !d.defaults || !d.limits || !Array.isArray(d.styles)) return note(t('error_generic'));
+    try { return panelEditor(g, d, channels, channelSel, savedChannelId); } catch (e) { console.error('panel editor failed', e); return note(t('error_generic')); }
+  }
+  // ---------------------------------------------------------------- verification panel editor (customise + publish)
+  const HEX = (n) => `#${Number(n).toString(16).padStart(6, '0')}`;
+  const PANEL_FIELDS = ['title', 'description', 'footer', 'color', 'thumbnailUrl', 'buttonLabel', 'buttonEmoji', 'buttonStyle', 'language'];
+  function panelEditor(g, initial, channels, channelSel, savedChannelId) {
+    let data = initial; let colorCustom = data.settings.color !== null; let busy = false; let channelNow = savedChannelId;
+    const lim = data.limits; const chName = (id) => { const c = channels.find((x) => x.id === id); return c ? `# ${c.name}` : id; };
+    const mk = (tag, id, v, extra = {}) => el(tag, { id, value: v ?? '', ...extra });
+    const inTitle = mk('input', 'pn-title', data.settings.title, { type: 'text', maxlength: lim.title });
+    const inDesc = mk('textarea', 'pn-desc', data.settings.description, { rows: 6, maxlength: lim.description });
+    const inFooter = mk('input', 'pn-footer', data.settings.footer, { type: 'text', maxlength: lim.footer });
+    const inThumb = mk('input', 'pn-thumb', data.settings.thumbnailUrl, { type: 'text', maxlength: lim.url, dir: 'ltr', inputmode: 'url' });
+    const inLabel = mk('input', 'pn-label', data.settings.buttonLabel, { type: 'text', maxlength: lim.buttonLabel });
+    const inEmoji = mk('input', 'pn-emoji', data.settings.buttonEmoji, { type: 'text', maxlength: 64, dir: 'ltr' });
+    const inColor = el('input', { type: 'color', id: 'pn-color', value: HEX(data.settings.color ?? data.defaults.color) });
+    const selStyle = el('select', { id: 'pn-style' }, data.styles.map((x) => el('option', { value: x, text: t(`pn_style_${x}`) }))); selStyle.value = data.settings.buttonStyle ?? data.defaults.style;
+    const selLang = el('select', { id: 'pn-lang' }, el('option', { value: '', text: t('pn_lang_server') }), el('option', { value: 'ar', text: t('pn_lang_ar') }), el('option', { value: 'en', text: t('pn_lang_en') })); selLang.value = data.settings.language ?? '';
+    const defs = () => data.defaults[selLang.value || data.serverLanguage];
+    const sync = () => { const d = defs(); inTitle.placeholder = d.title; inDesc.placeholder = d.description; inLabel.placeholder = d.buttonLabel; };
+
+    const errBox = {}; const wrap = {};
+    const pf = (key, label, input, hint) => { errBox[key] = el('p', { class: 'err', role: 'alert', hidden: true }); wrap[key] = el('div', { class: 'pf', 'data-field': key }, el('label', { for: input.id, text: label }), input, hint ? el('p', { class: 'muted hint', text: hint }) : null, errBox[key]); return wrap[key]; };
+    const clearErrors = () => PANEL_FIELDS.forEach((k) => { if (errBox[k]) { errBox[k].hidden = true; errBox[k].textContent = ''; wrap[k].classList.remove('invalid'); } });
+    const showIssues = (issues) => { for (const i of issues ?? []) { const b = errBox[i.field]; if (!b) continue; b.hidden = false; b.textContent = t(`pn_err_${i.code}`, { n: i.max ?? '' }); wrap[i.field].classList.add('invalid'); } };
+
+    const val = () => ({ title: inTitle.value, description: inDesc.value, footer: inFooter.value, thumbnailUrl: inThumb.value, buttonLabel: inLabel.value, buttonEmoji: inEmoji.value.trim(),
+      buttonStyle: selStyle.value, color: colorCustom ? inColor.value : null, language: selLang.value || null });
+    let savedSnap = JSON.stringify(val()); const dirty = () => JSON.stringify(val()) !== savedSnap;
+
+    // ---- live preview (never loads external images: the dashboard CSP only allows its own and Discord's)
+    const prevBox = el('div', { id: 'pn-preview' }); const statusBox = el('div', { class: 'panel-status', id: 'pn-status' });
+    const publishBtn = el('button', { class: 'btn primary', type: 'button', id: 'pn-publish' }); const repostBtn = el('button', { class: 'btn', type: 'button', id: 'pn-repost', text: t('pn_repost') });
+    const saveBtn = el('button', { class: 'btn', type: 'button', id: 'pn-save', text: t('pn_save') }); const resetBtn = el('button', { class: 'btn', type: 'button', id: 'pn-reset', text: t('pn_reset') });
+    const emojiNode = (e) => { const m = /^<a?:([A-Za-z0-9_]{2,32}):\d+>$/.exec(e); return m ? `:${m[1]}:` : e; };
+    function paint() {
+      const d = defs(); const v = val(); const color = colorCustom ? v.color : HEX(data.defaults.color);
+      const thumb = /^https:\/\//.test(v.thumbnailUrl.trim()) ? el('div', { class: 'ep-thumb', 'aria-hidden': 'true', text: t('pn_thumb_ph') }) : null;
+      prevBox.replaceChildren(
+        el('div', { class: 'embed-preview', style: `--ep-color:${color}` }, el('div', { class: 'ep-main' }, el('div', { class: 'ep-title', text: v.title.trim() || d.title }), el('div', { class: 'ep-desc', text: v.description.trim() || d.description }), v.footer.trim() ? el('div', { class: 'ep-foot', text: v.footer.trim() }) : null), thumb),
+        el('span', { class: `dc-btn ${v.buttonStyle}` }, v.buttonEmoji ? el('span', { text: emojiNode(v.buttonEmoji) }) : null, el('span', { text: v.buttonLabel.trim() || d.buttonLabel })));
+      const pub = data.published; const dest = channelSel.value || null;
+      publishBtn.textContent = pub ? t('pn_update') : t('pn_publish'); repostBtn.hidden = !pub; publishBtn.disabled = busy || !data.canPublish; repostBtn.disabled = busy || !data.canPublish; saveBtn.disabled = busy; resetBtn.disabled = busy;
+      statusBox.replaceChildren(
+        pub ? badge(t('pn_published_in', { ch: chName(pub.channelId) }), 'ok') : badge(t('pn_not_published'), 'warn'),
+        pub ? badge(t(pub.upToDate ? 'pn_up_to_date' : 'pn_outdated'), pub.upToDate ? 'ok' : 'warn') : null,
+        dirty() ? badge(t('pn_unsaved'), 'warn') : null,
+        pub ? el('a', { class: 'btn', href: pub.url, target: '_blank', rel: 'noopener noreferrer', text: t('pn_open_message') }) : null,
+        el('span', { class: 'muted hint', id: 'pn-dest', text: t('pn_dest', { ch: dest ? chName(dest) : t('pn_dest_none') }) }));
+    }
+    const onEdit = () => { sync(); paint(); };
+    [inTitle, inDesc, inFooter, inThumb, inLabel, inEmoji, selStyle, selLang].forEach((n) => { n.addEventListener('input', onEdit); n.addEventListener('change', onEdit); });
+    inColor.addEventListener('input', () => { colorCustom = true; paint(); });
+    channelSel.addEventListener('change', paint);
+    const colorDefault = el('button', { class: 'btn', type: 'button', id: 'pn-color-default', text: t('pn_color_default'), onclick: () => { colorCustom = false; inColor.value = HEX(data.defaults.color); paint(); } });
+
+    // ---- actions
+    const setBusy = (b) => { busy = b; paint(); };
+    async function savePanel(silent = false) {
+      clearErrors(); setBusy(true); const body = val(); const r = await api('PUT', `/api/guilds/${g}/verification/panel`, body); setBusy(false);
+      if (r.ok) { data = r.data; savedSnap = JSON.stringify(body); paint(); if (!silent) toast(t('pn_saved')); return true; }
+      if (r.data?.error === 'validation' && r.data.issues?.length) { showIssues(r.data.issues); toast(t('pn_fix_fields'), true); } else toast(errText(r), true);
+      return false;
+    }
+    const publishError = (r) => (r.data?.error === 'bot_missing_permissions' ? t('e_bot_missing_permissions', { perms: (r.data.missing ?? []).join(', ') || '—' }) : errText(r));
+    async function publish(mode) {
+      if (busy) return;
+      if (!channelSel.value) { toast(t('pn_need_channel'), true); return; }
+      setBusy(true);
+      if ((channelSel.value || null) !== channelNow) {                                   // the channel picked above is saved first (server re-validates it)
+        const c = await api('PUT', `/api/guilds/${g}/settings`, { verificationChannelId: channelSel.value });
+        if (!c.ok) { setBusy(false); toast(c.data?.error === 'invalid_channel' ? t('vf_invalid_channel') : errText(c), true); return; }
+        channelNow = channelSel.value;
+      }
+      if (dirty()) { setBusy(false); if (!(await savePanel(true))) return; setBusy(true); }
+      const r = await api('POST', `/api/guilds/${g}/verification/panel/publish`, mode ? { mode } : {});
+      busy = false;
+      if (!r.ok) { paint(); toast(publishError(r), true); return; }
+      data = r.data.panel; paint(); toast(t(`pn_ok_${r.data.result.action}`));
+    }
+    publishBtn.addEventListener('click', () => publish());
+    repostBtn.addEventListener('click', async () => { if (await confirmDialog(t('pn_repost_title'), t('pn_repost_text'))) publish('new'); });
+    saveBtn.addEventListener('click', () => savePanel());
+    resetBtn.addEventListener('click', async () => {
+      if (!(await confirmDialog(t('pn_reset_title'), t('pn_reset_text'), true))) return;
+      [inTitle, inDesc, inFooter, inThumb, inLabel, inEmoji].forEach((n) => { n.value = ''; }); colorCustom = false; inColor.value = HEX(data.defaults.color); selStyle.value = data.defaults.style; selLang.value = ''; sync(); paint();
+      await savePanel();
+    });
+
+    errBox.color = el('p', { class: 'err', role: 'alert', hidden: true });
+    const colorField = (wrap.color = el('div', { class: 'pf', 'data-field': 'color' }, el('label', { for: 'pn-color', text: t('pn_f_color') }), el('div', { class: 'colorrow' }, inColor, colorDefault), errBox.color));
+    sync(); paint();
+    return el('div', { class: 'card', id: 'pn-card' }, el('h3', {}, icon('verify'), ' ', t('pn_title')), el('p', { class: 'muted', text: t('pn_intro' ) }),
+      data.canPublish ? null : el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('pn_cannot_publish') })),
+      el('div', { class: 'panel-edit' },
+        el('div', {}, pf('title', t('pn_f_title'), inTitle), pf('description', t('pn_f_desc'), inDesc),
+          colorField,
+          pf('footer', t('pn_f_footer'), inFooter), pf('thumbnailUrl', t('pn_f_thumb'), inThumb),
+          el('div', { class: 'pair' }, pf('buttonLabel', t('pn_f_label'), inLabel), pf('buttonStyle', t('pn_f_style'), selStyle)),
+          pf('buttonEmoji', t('pn_f_emoji'), inEmoji, t('pn_f_emoji_hint')), pf('language', t('pn_f_lang'), selLang)),
+        el('div', { class: 'panel-side' }, el('h4', { text: t('pn_preview') }), prevBox, el('p', { class: 'muted hint', text: t('pn_preview_note') }), el('h4', { text: t('pn_status') }), statusBox,
+          el('div', { class: 'panel-actions' }, publishBtn, repostBtn, saveBtn, resetBtn))));
   }
 
   // ---------------------------------------------------------------- diagnostics

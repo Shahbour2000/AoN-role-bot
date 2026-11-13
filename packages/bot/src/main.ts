@@ -10,7 +10,8 @@ import { buildCommands } from './commands.js';
 import { loadConfig } from './config.js';
 import { DiscordJsGateway } from './discord-gateway.js';
 import { handleButton, handleCommand, handleModal, onGuildInstalled, type BotDeps } from './handlers.js';
-import { components, toButtonInvocation, toInvocation, toModalInvocation } from './interactions.js';
+import { createDiscordPanelPublisher } from './panel-publisher.js';
+import { toButtonInvocation, toInvocation, toModalInvocation } from './interactions.js';
 import { startScheduler } from './scheduler.js';
 
 const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
@@ -26,12 +27,9 @@ async function main() {
   const game = new AonClient({ baseUrl: cfg.apiBaseUrl });
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });   // no privileged intents required
   const discord = new DiscordJsGateway(client);
+  const panelPublisher = createDiscordPanelPublisher(client);        // one publisher for the /admin verify-panel command AND the dashboard
   const deps: BotDeps = { db, game, discord,
-    postPanel: async (guildId, channelId, r) => {
-      const ch = await client.channels.fetch(channelId);
-      if (!ch || ch.isDMBased() || !ch.isTextBased() || !('guildId' in ch) || ch.guildId !== guildId) throw new Error('channel is not in this server');   // never post into another server's channel
-      await ch.send({ content: r.content, components: components(r), allowedMentions: { parse: [] } });
-    },
+    panelPublisher,
     httpStats: () => ({ ...game.http.stats }), log, ...(cfg.mediaBaseUrl ? { mediaBaseUrl: cfg.mediaBaseUrl } : {}) };
 
   client.on(Events.GuildCreate, (g) => { onGuildInstalled(db, g.id, g.name).catch((e) => log(`guildCreate failed: ${e instanceof Error ? e.message : e}`)); });
@@ -65,7 +63,7 @@ async function main() {
       botRest: createDiscordBotRest({ botToken: web.botToken, clientId: web.clientId }), game,
       runSync: (guildId, actorId) => syncGuild({ db, game, discord, log }, { guildId, kind: 'all', requestedBy: actorId }),
       onUnlinked: async (guildId, userId, roleIds) => { const ok = await discord.assignableRoles(guildId); for (const r of roleIds) if (ok.has(r)) await discord.removeRole(guildId, userId, r, 'AoN role bot: account unlinked').catch(() => undefined); },
-      health, log, publicDir: fileURLToPath(new URL('../../web/public', import.meta.url)),
+      panelPublisher, health, log, publicDir: fileURLToPath(new URL('../../web/public', import.meta.url)),
     });
     await app.listen({ port: cfg.port, host: '0.0.0.0' });
     log(`dashboard + health on :${cfg.port} (${web.appBaseUrl})`);

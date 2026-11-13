@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { addRoleMapping, claimLink, findLinkForUser, getGlobalLinkForPlayer, getGlobalLinkForUser, updateGuildSettings } from '@aon/db';
+import { EMPTY_PANEL, type PanelMessage } from '@aon/core';
+import { addRoleMapping, claimLink, findLinkForUser, getGlobalLinkForPlayer, getGlobalLinkForUser, getPanel, savePanelSettings, updateGuildSettings } from '@aon/db';
+import { PanelPublishError } from '@aon/sync';
 import { AR_KEYS, MESSAGE_KEYS, handleButton, handleCommand, handleModal } from '../src/index.js';
 import { ROLE, botSetup, click, inv, player, rosterOf, verifyViaTicket } from './bot-harness.js';
 
@@ -115,15 +117,35 @@ describe('one global link works in every server', () => {
 });
 
 describe('panel, channel and modal', () => {
-  it('/admin verify-panel: admin only, needs the configured channel, posts the panel with the open button', async () => {
-    const h = await setupPres(); const posted: { g: string; ch: string; r: unknown }[] = []; h.deps.postPanel = async (g, ch, r) => { posted.push({ g, ch, r }); };
+  it('/admin verify-panel: admin only, needs the configured channel, posts the panel; running it again edits the same message (no duplicate)', async () => {
+    const h = await setupPres(); const sent: { op: string; ch: string; id?: string; m: PanelMessage }[] = []; let n = 0;
+    h.deps.panelPublisher = { post: async (_g, ch, m) => { sent.push({ op: 'post', ch, m }); return { messageId: `m${++n}` }; }, edit: async (_g, ch, id, m) => { sent.push({ op: 'edit', ch, id, m }); return true; }, remove: async () => undefined };
     expect((await send(h, { group: 'admin', sub: 'verify-panel', userId: 'm' })).last().content).toContain('Manage Server');
+    expect(sent).toHaveLength(0);
     expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('Choose the verification channel');
     await updateGuildSettings(h.db, 'A', { verification_channel_id: '555' }, 'u');
-    expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('<#555>');
-    expect(posted).toHaveLength(1); expect(JSON.stringify(posted[0]!.r)).toContain('vt:open');
-    h.deps.postPanel = async () => { throw new Error('missing access'); };
+    expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('was posted in <#555>');
+    expect(sent).toHaveLength(1); expect(sent[0]).toMatchObject({ op: 'post', ch: '555' }); expect(sent[0]!.m.button.customId).toBe('vt:open');
+    expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('was updated');
+    expect(sent[1]).toMatchObject({ op: 'edit', id: 'm1' });
+    expect((await getPanel(h.db, 'A')).published).toMatchObject({ channelId: '555', messageId: 'm1' });
+    expect((await h.db.query<{ details: { source: string } }>(`SELECT details FROM audit_events WHERE action='verification.panel_posted'`)).rows.map((r) => r.details.source)).toEqual(['command', 'command']);
+  });
+  it('/admin verify-panel reports permission problems precisely, generic failures generically, and a missing adapter without crashing', async () => {
+    const h = await setupPres(); await updateGuildSettings(h.db, 'A', { verification_channel_id: '555' }, 'u');
+    h.deps.panelPublisher = { post: async () => { throw new PanelPublishError('missing_permissions', ['SendMessages', 'EmbedLinks']); }, edit: async () => false, remove: async () => undefined };
+    expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toMatch(/missing these permissions there: SendMessages, EmbedLinks/);
+    h.deps.panelPublisher = { post: async () => { throw new Error('missing access'); }, edit: async () => false, remove: async () => undefined };
     expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('could not post');
+    delete h.deps.panelPublisher;
+    expect((await send(h, { group: 'admin', sub: 'verify-panel', admin: true })).last().content).toContain('could not post');
+  });
+  it('the command publishes the CUSTOMISED panel saved from the dashboard', async () => {
+    const h = await setupPres(); await updateGuildSettings(h.db, 'A', { verification_channel_id: '555' }, 'u');
+    await savePanelSettings(h.db, 'A', { ...EMPTY_PANEL, title: 'Nationality request', buttonEmoji: '🇪🇬', buttonStyle: 'success' }, 'u'); let m: PanelMessage | null = null;
+    h.deps.panelPublisher = { post: async (_g, _c, x) => { m = x; return { messageId: 'm1' }; }, edit: async () => false, remove: async () => undefined };
+    await send(h, { group: 'admin', sub: 'verify-panel', admin: true });
+    expect(m).toMatchObject({ embed: { title: 'Nationality request' }, button: { style: 'success', emoji: { name: '🇪🇬' }, customId: 'vt:open' } });
   });
   it('the panel button opens a modal for a new member; the modal submit creates the ticket; a verified member is answered privately', async () => {
     const h = await setupPres(); h.game.names.set('alpha', player('p1', 'Alpha'));
