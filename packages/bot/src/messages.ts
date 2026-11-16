@@ -2,7 +2,7 @@ export type Lang = 'en' | 'ar';
 const M = {
   en: {
     guild_only: 'This command can only be used inside a server.',
-    not_admin: 'You need the **Manage Server** permission to use this command.',
+    not_admin: 'You need the **Manage Server** permission (or a trusted bot-administrator role) to use this command.',
     busy: 'That is already running. Please wait a moment.',
     cooldown: 'Please wait a few seconds before trying again.',
     api_down: 'The game API is temporarily unavailable. Nothing was changed. Please try again shortly.',
@@ -71,7 +71,7 @@ const M = {
   },
   ar: {
     guild_only: 'هذا الأمر يعمل داخل السيرفر فقط.',
-    not_admin: 'تحتاج إلى صلاحية **إدارة السيرفر** لاستخدام هذا الأمر.',
+    not_admin: 'تحتاج إلى صلاحية **إدارة السيرفر** (أو رتبة مسؤول موثوق للبوت) لاستخدام هذا الأمر.',
     busy: 'العملية قيد التنفيذ بالفعل. انتظر قليلاً.',
     cooldown: 'انتظر بضع ثوانٍ قبل المحاولة مرة أخرى.',
     api_down: 'واجهة اللعبة غير متاحة مؤقتاً. لم يتم تغيير أي شيء. حاول لاحقاً.',

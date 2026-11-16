@@ -118,6 +118,11 @@ describe('verification page: panel editor (jsdom, real shipped scripts, real API
     const p = await open(c, l, 'en'); await waitFor(() => p.$('#pn-card'), 'card');
     expect((p.$('#pn-publish') as HTMLButtonElement).disabled).toBe(true); expect(p.$('#pn-card .callout')?.textContent).toContain('not connected');
   });
+  it('no page ever shows the literal text "null" (status row of a never-published panel, and the Overview page)', async () => {
+    const { p } = await boot(); expect(p.$('#pn-status')?.textContent).not.toMatch(/null|undefined/); expect(p.$('#pn-card')?.textContent).not.toMatch(/\bnull\b|undefined/);
+    p.win.location.hash = `#/g/${G1}/overview`; await waitFor(() => p.$('.stat') && !p.$('#pn-card'), 'overview');
+    expect(p.$('main, #content, body')?.textContent).not.toMatch(/\bnull\b|undefined/); expect(p.doc.body.textContent).not.toMatch(/\bnull\b|undefined/);
+  });
   it('Arabic page: RTL document, Arabic labels/status; the panel-language selector switches the DEFAULT texts to Arabic', async () => {
     const { p } = await boot('ar'); expect(p.doc.documentElement.getAttribute('dir')).toBe('rtl');
     expect(p.$('label[for="pn-title"]')?.textContent).toBe('عنوان الرسالة'); expect(p.$('#pn-publish')?.textContent).toBe('نشر اللوحة'); expect(p.$('#pn-status')?.textContent).toContain('لم تُنشر بعد');

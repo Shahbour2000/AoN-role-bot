@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { syncOneUser } from '../src/index.js';
-import { ROLE, citizensOf, link, map, profileOf, rankRole, rosterOf, setup } from './harness.js';
+import { ROLE, citizensOf, link, map, profileOf, rankRole, rosterOf, setup, legacyMap } from './harness.js';
 import { getLadder, saveLadder, listActiveLinks } from '@aon/db';
 import { DEFAULT_RANKS } from '@aon/core';
 import { updateGuildSettings } from '@aon/db';
@@ -130,7 +130,7 @@ describe('citizen / party / unit (profile based)', () => {
   it('alliance roles are never changed (data unverified)', async () => {
     const h = await setup();
     await updateGuildSettings(h.db, 'A', { modules: { government: true, party: true, unit: false, alliance: true, ranks: true } }, null);
-    await link(h.db, 'A', 'd1', 'p1'); await map(h.db, 'A', 'alliance_member', ROLE.ally);
+    await link(h.db, 'A', 'd1', 'p1'); await legacyMap(h.db, 'A', 'alliance_member', ROLE.ally);
     h.discord.give('A', 'd1', ROLE.ally);
     const r = await run(h);
     expect(h.discord.has('A', 'd1').has(ROLE.ally)).toBe(true);

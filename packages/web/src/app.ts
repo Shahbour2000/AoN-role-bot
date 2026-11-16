@@ -3,12 +3,13 @@ import { extname, join, normalize } from 'node:path';
 import fastifyCookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched } from '@aon/core';
+import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched, IDENTITY_KINDS, isIdentityKind, isProxyKind } from '@aon/core';
 import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
   getSyncStatus, listAudit, listLinksDetailed, listRoleMappings, listSyncJobs, removeRoleMapping, reviewLink, saveLadder, updateGuildSettings, DEFAULT_LADDER_SEED, type Db,
   verificationStats, getPanel, savePanelSettings,
+  setProxyCountry, removeProxyCountry, setIdentityRole, listAdminRoles, addAdminRole, removeAdminRole, guildsWithAdminRoles, MAX_ADMIN_ROLES,
 } from '@aon/db';
 import { publishVerificationPanel, type PanelPublisher } from '@aon/sync';
 import type { WebConfig } from './config.js';
@@ -33,6 +34,8 @@ export interface WebDeps {
   onUnlinked?(guildId: string, discordUserId: string, roleIds: string[]): Promise<void>;
   /** Posts / edits the verification panel in Discord (same adapter the `/admin verify-panel` command uses). Absent => publishing answers `publisher_unavailable`. */
   panelPublisher?: PanelPublisher;
+  /** Extra origins the dashboard may load entity images from (the game API's own origin). Nothing else is ever allowed. */
+  imageOrigins?: string[];
   health?(): Promise<{ database: boolean; discord: boolean; gameApi: Record<string, number | null> | null }>;
   now?: () => Date; log?: (m: string) => void; publicDir?: string;
 }
@@ -68,7 +71,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('referrer-policy', 'same-origin');
     reply.header('x-frame-options', 'DENY');
-    reply.header('content-security-policy', "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    reply.header('content-security-policy', `default-src 'self'; img-src 'self' https://cdn.discordapp.com ${(deps.imageOrigins ?? []).filter((o) => /^https:\/\/[a-z0-9.-]+$/i.test(o)).join(' ')} data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
     if (cfg.secureCookies) reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
     if (req.url.startsWith('/api') || req.url.startsWith('/auth')) reply.header('cache-control', 'no-store');
   });
@@ -107,8 +110,24 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     }
   }
 
-  /** The single authorization gate for every /api/guilds/:guildId/* route. Replies and returns null on failure. */
-  async function guard(req: FastifyRequest, reply: FastifyReply, opts: { write?: boolean } = {}) {
+  /**
+   * Trusted bot administrator: holds one of the server's configured trusted roles. The member's roles are read from Discord by the BOT (never from the
+   * browser) and cached for a few seconds; any doubt (no roles configured, member unknown, Discord down) means "not trusted".
+   */
+  const memberRolesCache = new Map<string, { at: number; roles: string[] | null }>();
+  async function isTrusted(guildId: string, userId: string): Promise<boolean> {
+    const configured = await listAdminRoles(db, guildId); if (!configured.length) return false;
+    const key = `${guildId}:${userId}`; const hit = memberRolesCache.get(key); let mine: string[] | null;
+    if (hit && clock().getTime() - hit.at < 15_000) mine = hit.roles;
+    else { mine = await deps.botRest.memberRoles(guildId, userId).catch(() => null); if (memberRolesCache.size > 2000) memberRolesCache.clear(); memberRolesCache.set(key, { at: clock().getTime(), roles: mine }); }
+    return !!mine && configured.some((r) => mine!.includes(r.roleId));
+  }
+  /**
+   * The single authorization gate for every /api/guilds/:guildId/* route. Replies and returns null on failure.
+   * Access level 'admin' = Discord owner / Administrator / Manage Server. 'trusted' = holds a trusted bot-administrator role: everything EXCEPT the routes that
+   * pass `adminOnly` (managing the trusted roles, the server's type/country/party/unit, releasing the country).
+   */
+  async function guard(req: FastifyRequest, reply: FastifyReply, opts: { write?: boolean; adminOnly?: boolean } = {}) {
     const guildId = (req.params as { guildId?: string }).guildId ?? '';
     if (!SNOWFLAKE.test(guildId)) { await fail(reply, 400, 'invalid_guild_id'); return null; }
     const s = await currentSession(req);
@@ -121,9 +140,15 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     try { guilds = await liveGuilds(s); } catch { await fail(reply, 503, 'discord_unavailable'); return null; }
     if (!guilds) { await fail(reply, 401, 'unauthenticated'); return null; }
     const g = guilds.find((x) => x.id === guildId);
-    if (!g || !canManageGuild(g)) { await fail(reply, 403, 'forbidden'); return null; }         // same answer whether or not the guild exists
+    if (!g) { await fail(reply, 403, 'forbidden'); return null; }                                  // same answer whether or not the guild exists
+    let level: 'admin' | 'trusted' = 'admin';
+    if (!canManageGuild(g)) {
+      if (!(await isTrusted(guildId, s.discordUserId))) { await fail(reply, 403, 'forbidden'); return null; }
+      level = 'trusted';
+    }
+    if (opts.adminOnly && level !== 'admin') { await fail(reply, 403, 'owner_only'); return null; }
     if (!(await guildExists(db, guildId))) { await fail(reply, 404, 'bot_not_installed'); return null; }
-    return { session: s, guildId, guild: g };
+    return { session: s, guildId, guild: g, level };
   }
 
   // ------------------------------------------------------------------ auth
@@ -173,11 +198,14 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     let guilds: DiscordGuildInfo[] | null;
     try { guilds = await liveGuilds(s); } catch { return fail(reply, 503, 'discord_unavailable'); }
     if (!guilds) return fail(reply, 401, 'unauthenticated');
-    const manageable = guilds.filter(canManageGuild);       // ONLY guilds the user may manage are ever returned
+    const manageable = guilds.filter(canManageGuild);       // ONLY guilds the user may manage (or is a trusted bot administrator of) are ever returned
+    const others = guilds.filter((g) => !canManageGuild(g)); const withTrust = await guildsWithAdminRoles(db, others.map((g) => g.id));
+    const trustedGuilds: DiscordGuildInfo[] = [];
+    for (const g of others) if (withTrust.has(g.id) && (await isTrusted(g.id, s.discordUserId))) trustedGuilds.push(g);
     const out = [];
-    for (const g of manageable) {
+    for (const g of [...manageable, ...trustedGuilds]) {
       const installed = await guildExists(db, g.id);
-      out.push({ id: g.id, name: g.name, icon: g.icon, installed, ...(installed ? {} : { inviteUrl: `https://discord.com/oauth2/authorize?${new URLSearchParams({ client_id: cfg.clientId, scope: 'bot applications.commands', permissions: String(0x10000000), guild_id: g.id, disable_guild_select: 'true' })}` }) });
+      out.push({ id: g.id, name: g.name, icon: g.icon, installed, access: canManageGuild(g) ? 'admin' : 'trusted', ...(installed ? {} : { inviteUrl: `https://discord.com/oauth2/authorize?${new URLSearchParams({ client_id: cfg.clientId, scope: 'bot applications.commands', permissions: String(0x10000000), guild_id: g.id, disable_guild_select: 'true' })}` }) });
     }
     return { guilds: out };
   });
@@ -192,7 +220,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (!mappings.length && !ladder.some((r) => r.discordRoleId)) warnings.push('nothing_configured');
     if ((counts['pending'] ?? 0) > 0) warnings.push('pending_requests');
     const builds = await getBuildRoles(db, a.guildId);
-    return { settings: cfgG && { ...cfgG, syncIntervalHours: cfgG.syncIntervalMinutes / 60 }, links: { active: (counts['verified'] ?? 0) + (counts['admin_linked'] ?? 0), pending: counts['pending'] ?? 0 }, lastJob: jobs[0] ?? null, recentJobs: jobs, recentAudit: audit, warnings, modules: cfgG?.modules ?? null, builds: { configured: BUILD_ROLE_KEYS.filter((k) => builds[k]).length, total: BUILD_ROLE_KEYS.length }, mappingsCount: mappings.filter((m) => !isBuildKind(m.kind)).length };
+    return { settings: cfgG && { ...cfgG, syncIntervalHours: cfgG.syncIntervalMinutes / 60 }, links: { active: (counts['verified'] ?? 0) + (counts['admin_linked'] ?? 0), pending: counts['pending'] ?? 0 }, lastJob: jobs[0] ?? null, recentJobs: jobs, recentAudit: audit, warnings, modules: cfgG?.modules ?? null, builds: { configured: BUILD_ROLE_KEYS.filter((k) => builds[k]).length, total: BUILD_ROLE_KEYS.length }, mappingsCount: mappings.filter((m) => !isBuildKind(m.kind) && !isProxyKind(m.kind) && !isIdentityKind(m.kind)).length };
   });
 
   app.get('/api/guilds/:guildId/diagnostics', async (req, reply) => {
@@ -232,6 +260,8 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const p = SettingsBody.safeParse(req.body);
     if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     const b = p.data;
+    // What the server IS (type / country / party / unit) is owner-level: a trusted bot administrator manages everything else.
+    if (a.level !== 'admin' && (b.communityType !== undefined || b.countryId !== undefined || b.partyId !== undefined || b.unitId !== undefined || b.allianceId !== undefined || b.confirmRemoveIncompatible !== undefined)) return fail(reply, 403, 'owner_only');
     const cur = await getGuildConfig(db, a.guildId); if (!cur) return fail(reply, 404, 'bot_not_installed');
     const newType = b.communityType ?? cur.communityType;
     // A country server gives its country up ONLY through the explicit release action (DELETE .../country), never by saving an empty field.
@@ -275,7 +305,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
 
   // The explicit, audited "unlink": the only way a country server gives its country (and therefore the reservation) up.
   app.delete('/api/guilds/:guildId/country', async (req, reply) => {
-    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const a = await guard(req, reply, { write: true, adminOnly: true }); if (!a) return;
     return (await releaseCountry(db, a.guildId, a.session.discordUserId)) ? { settings: await settingsView(a.guildId) } : fail(reply, 409, 'no_country');
   });
 
@@ -389,12 +419,13 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
 
   // ------------------------------------------------------------------ role mappings
   const MappingBody = z.object({ kind: z.enum(ROLE_KINDS), gameRef: z.string().regex(/^[A-Za-z0-9_-]{0,80}$/).optional(), discordRoleId: z.string().regex(SNOWFLAKE) }).strict();
-  app.get('/api/guilds/:guildId/mappings', async (req, reply) => { const a = await guard(req, reply); if (!a) return; return { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind)) }; });
+  app.get('/api/guilds/:guildId/mappings', async (req, reply) => { const a = await guard(req, reply); if (!a) return; return { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind) && !isProxyKind(m.kind) && !isIdentityKind(m.kind)) }; });
   app.post('/api/guilds/:guildId/mappings', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
     const p = MappingBody.safeParse(req.body);
     if (!p.success) return fail(reply, 422, 'validation', { issues: p.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
     if (isBuildKind(p.data.kind)) return fail(reply, 422, 'use_builds_endpoint');             // build roles have their own permanent settings
+    if (isProxyKind(p.data.kind) || isIdentityKind(p.data.kind)) return fail(reply, 422, 'use_dedicated_endpoint');   // proxy countries / country identity roles have their own sections
     if (p.data.kind.startsWith('alliance_')) return fail(reply, 422, 'feature_unavailable');     // no backing implementation: the game API exposes no verified alliance data
     const cfgM = await getGuildConfig(db, a.guildId);
     if (!cfgM || !isKindAllowed(cfgM.communityType, p.data.kind)) return fail(reply, 422, 'kind_not_allowed_for_type');   // the server type decides which roles exist
@@ -403,13 +434,96 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const role = roles.find((r) => r.id === p.data.discordRoleId);
     if (!role || unusableRoles(roles, [p.data.discordRoleId]).length) return fail(reply, 422, 'role_invalid');
     const res = await addRoleMapping(db, { guildId: a.guildId, kind: p.data.kind, ...(p.data.gameRef ? { gameRef: p.data.gameRef } : {}), discordRoleId: p.data.discordRoleId, actor: a.session.discordUserId });
-    return res.ok ? { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind)), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code.toLowerCase());
+    return res.ok ? { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind) && !isProxyKind(m.kind) && !isIdentityKind(m.kind)), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : res.code.toLowerCase());
   });
   app.delete('/api/guilds/:guildId/mappings/:mappingId', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
     const id = (req.params as { mappingId: string }).mappingId;
     if (!/^[0-9a-f-]{36}$/.test(id)) return fail(reply, 400, 'invalid_id');
     return (await removeRoleMapping(db, { guildId: a.guildId, mappingId: id, actor: a.session.discordUserId })) ? { ok: true } : fail(reply, 404, 'not_found');
+  });
+
+  // ------------------------------------------------------------------ proxy countries, country identity roles, trusted bot administrators
+  /** Every write below validates the Discord role against Discord (it must exist in THIS server and be usable); the database re-validates the rules under the guild lock. */
+  const usableRole = async (guildId: string, roleId: string): Promise<'ok' | 'unavailable' | 'invalid'> => {
+    const roles = await rolesFor(guildId); if (!roles) return 'unavailable';
+    return unusableRoles(roles, [roleId]).length ? 'invalid' : 'ok';
+  };
+  const mappingFail = (reply: FastifyReply, code: string) =>
+    fail(reply, code === 'ROLE_CONFLICT' || code === 'ROLE_IN_USE' ? 409 : 422, code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : code.toLowerCase());
+  const countryName = async (id: string): Promise<string | null> => {
+    const g = deps.game; if (!g.countryOptions) return null;
+    const r = await cachedOptions('countries', () => g.countryOptions!()); return r.status === 'ok' ? (r.data.find((o) => o.id === id)?.name ?? null) : null;
+  };
+
+  app.get('/api/guilds/:guildId/proxy-countries', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const cfgP = await getGuildConfig(db, a.guildId); if (!cfgP) return fail(reply, 404, 'bot_not_installed');
+    const rows = (await listRoleMappings(db, a.guildId)).filter((m) => isProxyKind(m.kind));
+    const proxies = await Promise.all(rows.map(async (m) => ({ countryId: m.gameRef, countryName: await countryName(m.gameRef), discordRoleId: m.discordRoleId })));
+    return { enabled: cfgP.communityType === 'country' && !!cfgP.countryId, ownCountryId: cfgP.countryId, proxies: proxies.sort((x, y) => (x.countryName ?? x.countryId).localeCompare(y.countryName ?? y.countryId)) };
+  });
+  app.put('/api/guilds/:guildId/proxy-countries/:countryId', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const countryId = (req.params as { countryId: string }).countryId; const body = z.object({ discordRoleId: z.string().regex(SNOWFLAKE) }).strict().safeParse(req.body);
+    if (!GAME_ID.safeParse(countryId).success || !body.success) return fail(reply, 422, 'validation');
+    const cfgP = await getGuildConfig(db, a.guildId); if (!cfgP) return fail(reply, 404, 'bot_not_installed');
+    if (cfgP.communityType !== 'country' || !cfgP.countryId) return fail(reply, 422, 'not_country_server');
+    // The country must really exist in the game (discovered through the API, never trusted from the browser). If the list cannot be read we refuse rather than guess.
+    if (!deps.game.countryOptions) return fail(reply, 503, 'game_unavailable');
+    const list = await cachedOptions('countries', () => deps.game.countryOptions!());
+    if (list.status !== 'ok') return fail(reply, 503, `game_${list.status}`);
+    const country = list.data.find((o) => o.id === countryId);
+    if (!country) return fail(reply, 422, 'unknown_country');
+    const ru = await usableRole(a.guildId, body.data.discordRoleId); if (ru === 'unavailable') return fail(reply, 503, 'discord_unavailable'); if (ru === 'invalid') return fail(reply, 422, 'role_invalid');
+    const res = await setProxyCountry(db, { guildId: a.guildId, countryId: country.id, discordRoleId: body.data.discordRoleId, actor: a.session.discordUserId });
+    return res.ok ? { ok: true, countryId: country.id, countryName: country.name } : res.code === 'SAME_AS_OWN_COUNTRY' ? fail(reply, 422, 'same_country') : mappingFail(reply, res.code);
+  });
+  app.delete('/api/guilds/:guildId/proxy-countries/:countryId', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const countryId = (req.params as { countryId: string }).countryId; if (!GAME_ID.safeParse(countryId).success) return fail(reply, 422, 'validation');
+    return (await removeProxyCountry(db, { guildId: a.guildId, countryId, actor: a.session.discordUserId })) ? { ok: true } : fail(reply, 404, 'not_found');
+  });
+
+  app.get('/api/guilds/:guildId/identity-roles', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const cfgI = await getGuildConfig(db, a.guildId); if (!cfgI) return fail(reply, 404, 'bot_not_installed');
+    const rows = (await listRoleMappings(db, a.guildId)).filter((m) => isIdentityKind(m.kind));
+    return { enabled: cfgI.communityType === 'country' && !!cfgI.countryId, countryId: cfgI.countryId, kinds: IDENTITY_KINDS, roles: Object.fromEntries(IDENTITY_KINDS.map((k) => [k, rows.find((m) => m.kind === k)?.discordRoleId ?? null])) };
+  });
+  app.put('/api/guilds/:guildId/identity-roles', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const body = z.object({ kind: z.enum(IDENTITY_KINDS), roleId: z.string().regex(SNOWFLAKE).nullable() }).strict().safeParse(req.body); if (!body.success) return fail(reply, 422, 'validation');
+    if (body.data.roleId !== null) { const ru = await usableRole(a.guildId, body.data.roleId); if (ru === 'unavailable') return fail(reply, 503, 'discord_unavailable'); if (ru === 'invalid') return fail(reply, 422, 'role_invalid'); }
+    const res = await setIdentityRole(db, { guildId: a.guildId, kind: body.data.kind, discordRoleId: body.data.roleId, actor: a.session.discordUserId });
+    return res.ok ? { ok: true } : mappingFail(reply, res.code);
+  });
+
+  /** The trusted-administrator roles. Anyone who may open the dashboard can SEE them; only an owner-level administrator can change them. */
+  app.get('/api/guilds/:guildId/admin-roles', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const [configured, roles] = await Promise.all([listAdminRoles(db, a.guildId), rolesFor(a.guildId)]);
+    const byId = new Map((roles ?? []).map((r) => [r.id, r]));
+    return { canManage: a.level === 'admin', level: a.level, max: MAX_ADMIN_ROLES, rolesAvailable: !!roles,
+      roles: configured.map((r) => ({ roleId: r.roleId, name: byId.get(r.roleId)?.name ?? null, color: byId.get(r.roleId)?.color ?? 0, missing: !!roles && !byId.has(r.roleId), addedBy: r.addedBy, addedAt: r.addedAt })) };
+  });
+  app.post('/api/guilds/:guildId/admin-roles', async (req, reply) => {
+    const a = await guard(req, reply, { write: true, adminOnly: true }); if (!a) return;
+    const body = z.object({ roleId: z.string().regex(SNOWFLAKE) }).strict().safeParse(req.body); if (!body.success) return fail(reply, 422, 'validation');
+    const roles = await rolesFor(a.guildId); if (!roles) return fail(reply, 503, 'discord_unavailable');
+    const role = roles.find((r) => r.id === body.data.roleId);
+    // @everyone would make EVERY member a bot administrator; integration roles belong to bots. Neither is ever accepted. (Roles that carry Discord's Administrator permission are fine: the role itself adds nothing.)
+    if (!role || role.reason === 'everyone_role' || role.reason === 'integration_managed') return fail(reply, 422, 'role_invalid');
+    const res = await addAdminRole(db, { guildId: a.guildId, roleId: body.data.roleId, actor: a.session.discordUserId });
+    if (!res.ok) return fail(reply, res.code === 'TOO_MANY' ? 409 : 422, res.code.toLowerCase());
+    memberRolesCache.clear();
+    return { ok: true };
+  });
+  app.delete('/api/guilds/:guildId/admin-roles/:roleId', async (req, reply) => {
+    const a = await guard(req, reply, { write: true, adminOnly: true }); if (!a) return;
+    const roleId = (req.params as { roleId: string }).roleId; if (!SNOWFLAKE.test(roleId)) return fail(reply, 422, 'validation');
+    const ok = await removeAdminRole(db, { guildId: a.guildId, roleId, actor: a.session.discordUserId }); memberRolesCache.clear();
+    return ok ? { ok: true } : fail(reply, 404, 'not_found');
   });
 
   // ------------------------------------------------------------------ player accounts

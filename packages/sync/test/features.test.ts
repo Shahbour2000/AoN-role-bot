@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_RANKS } from '@aon/core';
 import { getGuildConfig, getLadder, getRetiredRankRoles, listActiveLinks, listRoleMappings, saveLadder, updateGuildSettings } from '@aon/db';
 import { syncGuild, syncMember, syncOneUser, type SyncContext } from '../src/index.js';
-import { ROLE, citizensOf, link, map, noSleep, profileOf, rankRole, rosterOf, setup } from './harness.js';
+import { ROLE, citizensOf, link, map, noSleep, profileOf, rankRole, rosterOf, setup, legacyMap } from './harness.js';
 
 type H = Awaited<ReturnType<typeof setup>>;
 const run = async (h: H, user = 'd1') => { const r = await syncOneUser({ db: h.db, game: h.game, discord: h.discord, sleep: noSleep }, 'A', user); if ('error' in r) throw new Error(r.error); return r; };
@@ -99,7 +99,7 @@ describe('military-unit server: member and leader, optional "leader replaces mem
 describe('alliance server: not implemented (no verified API data) — nothing is changed', () => {
   it('alliance mappings never add or remove a role, and the reason is reported', async () => {
     const h = await setup(); await link(h.db, 'A', 'd1', 'p1'); h.discord.give('A', 'd1', '410001');
-    await mods(h, { alliance: true }); await map(h.db, 'A', 'alliance_member', '410001');
+    await mods(h, { alliance: true }); await legacyMap(h.db, 'A', 'alliance_member', '410001');
     h.game.profiles.set('p1', profileOf('p1'));
     const r = await run(h);
     expect(r.removed).toEqual([]); expect(r.added).toEqual([]); expect(h.discord.has('A', 'd1').has('410001')).toBe(true);

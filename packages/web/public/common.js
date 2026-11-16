@@ -44,6 +44,7 @@
     back: ['M15 6l-6 6 6 6'],
     dot: ['M12 12h.01'],
   };
+  ICONS.proxy = ICONS.flag; ICONS.admins = ICONS.shield;          // new dashboard pages reuse existing glyphs
   const SVG = 'http://www.w3.org/2000/svg';
   const icon = (name, cls = '') => {
     const s = document.createElementNS(SVG, 'svg');

@@ -75,6 +75,8 @@ export async function setup(opts: { guilds?: string[]; withRanks?: boolean } = {
   return { db, discord: new FakeDiscord(), game: new FakeGame() };
 }
 export const link = (db: Db, g: string, user: string, player: string) => forceLink(db, { guildId: g, adminId: 'adm', discordUserId: user, playerId: player, username: player });
+/** A mapping row as an OLDER version could have created it (e.g. an alliance kind, which the server types no longer offer): inserted directly, bypassing today's validation. */
+export const legacyMap = (db: Db, g: string, kind: string, roleId: string) => db.query('INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ($1,$2,$3,$4)', [g, kind, '', roleId]);
 export const map = (db: Db, g: string, kind: string, roleId: string, gameRef?: string) => addRoleMapping(db, { guildId: g, kind, discordRoleId: roleId, ...(gameRef ? { gameRef } : {}), actor: null });
 
 /** Error shapes as thrown by discord.js: DiscordAPIError carries a numeric `code` (JSON error) and HTTP `status`. */

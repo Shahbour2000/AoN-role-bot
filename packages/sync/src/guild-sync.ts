@@ -1,6 +1,6 @@
 import { clearRetiredRankRoles, getRetiredRankRoles, getLadder, getGuildConfig, finishSyncJob, isJobRunning, listActiveLinks, listRoleMappings, scheduleRetry, startSyncJob, updateJobProgress, audit, type Db } from '@aon/db';
 import type { Fetched } from '@aon/core';
-import type { CitizensIndex, GovernmentRoster } from '@aon/client';
+import type { CitizensIndex, GovernmentRoster, PartySummary, UnitSummary } from '@aon/client';
 import { syncMember, type SyncContext, type UserSyncResult } from './member-sync.js';
 import type { DiscordGateway, GameData } from './ports.js';
 
@@ -22,11 +22,19 @@ export type GuildSyncResult =
 export function memoizeCountryData(game: GameData): GameData {
   const roster = new Map<string, Fetched<GovernmentRoster>>();
   const citizens = new Map<string, Fetched<CitizensIndex>>();
+  const parties = new Map<string, Promise<Fetched<PartySummary[]>>>(); const units = new Map<string, Promise<Fetched<UnitSummary[]>>>();
+  const once = <T>(m: Map<string, Promise<Fetched<T>>>, k: string, load: () => Promise<Fetched<T>>): Promise<Fetched<T>> => {
+    const hit = m.get(k); if (hit) return hit;
+    const p = load().then((r) => { if (r.status !== 'ok') m.delete(k); return r; }, (e) => { m.delete(k); throw e; }); m.set(k, p); return p;
+  };
   return {
     playerProfile: (id) => game.playerProfile(id),
     playerAllTimeDamage: (id) => game.playerAllTimeDamage(id),
     async governmentRoster(c) { const hit = roster.get(c); if (hit) return hit; const r = await game.governmentRoster(c); if (r.status === 'ok') roster.set(c, r); return r; },
     async countryCitizens(c) { const hit = citizens.get(c); if (hit) return hit; const r = await game.countryCitizens(c); if (r.status === 'ok') citizens.set(c, r); return r; },
+    // Parties / units: one request per country per run, shared by members syncing at the same time (the in-flight promise is cached); failures are never kept.
+    ...(game.countryParties ? { countryParties: (c: string) => once(parties, c, () => game.countryParties!(c)) } : {}),
+    ...(game.countryUnits ? { countryUnits: (c: string) => once(units, c, () => game.countryUnits!(c)) } : {}),
   };
 }
 

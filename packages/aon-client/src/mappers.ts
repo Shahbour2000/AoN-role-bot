@@ -275,7 +275,7 @@ export function extractParties(res: Fetched<unknown>): Fetched<PartySummary[]> {
   return { status: 'ok', data: out };
 }
 
-export interface UnitSummary { id: string; name: string | null; countryId: string | null; ownerId: string | null; ownerName: string | null; members: number | null; capacity: number | null; joinPolicy: string | null }
+export interface UnitSummary { id: string; name: string | null; countryId: string | null; ownerId: string | null; ownerName: string | null; members: number | null; capacity: number | null; joinPolicy: string | null; logoUrl: string | null }
 export function extractUnits(res: Fetched<unknown>): Fetched<UnitSummary[]> {
   if (res.status !== 'ok') return res;
   const list = Array.isArray(res.data) ? res.data : isObj(res.data) && Array.isArray(res.data['units']) ? res.data['units'] : undefined; // sample is a bare array
@@ -285,7 +285,7 @@ export function extractUnits(res: Fetched<unknown>): Fetched<UnitSummary[]> {
     const id = isObj(u) ? idString(u['id']) : null;
     if (!isObj(u) || !id) return { status: 'incomplete', missing: [`units[${i}].id`] };
     out.push({ id, name: typeof u['name'] === 'string' ? u['name'] : null, countryId: idString(u['countryId']), ownerId: idString(u['ownerId']), ownerName: typeof u['ownerName'] === 'string' ? u['ownerName'] : null,
-      members: typeof u['members'] === 'number' ? u['members'] : null, capacity: typeof u['capacity'] === 'number' ? u['capacity'] : null, joinPolicy: typeof u['joinPolicy'] === 'string' ? u['joinPolicy'] : null });
+      members: typeof u['members'] === 'number' ? u['members'] : null, capacity: typeof u['capacity'] === 'number' ? u['capacity'] : null, joinPolicy: typeof u['joinPolicy'] === 'string' ? u['joinPolicy'] : null, logoUrl: httpsUrl(u['logoUrl']) });
   }
   return { status: 'ok', data: out };
 }
@@ -358,8 +358,8 @@ export function extractCountryNames(res: Fetched<unknown>): Fetched<Map<string, 
   return out.size ? { status: 'ok', data: out } : { status: 'incomplete', missing: ['countries (no id/name pairs)'] };
 }
 
-/** A selectable game entity. `name` is a real game string; there is NO image/flag field here because none has been verified in any sample. */
-export interface EntityOption { id: string; name: string }
+/** A selectable game entity. `name` is a real game string. */
+export interface EntityOption { id: string; name: string; /** https image of the entity when the API provides one (units: `logoUrl`); parties and countries expose none in any sample. */ imageUrl?: string }
 
 /** Countries as options, A–Z. Same tolerant extractor as the display-name lookup (shape unverified). */
 export function extractCountryOptions(res: Fetched<unknown>): Fetched<EntityOption[]> {
@@ -368,8 +368,10 @@ export function extractCountryOptions(res: Fetched<unknown>): Fetched<EntityOpti
   return { status: 'ok', data: [...names.data].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)) };
 }
 /** Parties / units of the VERIFIED list shapes as options. Entries without a name are skipped (they cannot be shown meaningfully). */
+/** An image is used ONLY when the API gives an absolute https URL; a relative path or anything else is ignored (the dashboard then draws initials). */
+const httpsUrl = (v: unknown): string | null => { if (typeof v !== 'string') return null; try { const u = new URL(v); return u.protocol === 'https:' && !u.username && !u.password ? u.toString() : null; } catch { return null; } };
 export const partyOptions = (list: readonly PartySummary[]): EntityOption[] => list.filter((p) => p.name).map((p) => ({ id: p.id, name: p.name as string }));
-export const unitOptions = (list: readonly UnitSummary[]): EntityOption[] => list.filter((u) => u.name).map((u) => ({ id: u.id, name: u.name as string }));
+export const unitOptions = (list: readonly UnitSummary[]): EntityOption[] => list.filter((u) => u.name).map((u) => ({ id: u.id, name: u.name as string, ...(u.logoUrl ? { imageUrl: u.logoUrl } : {}) }));
 
 /** Display name from a single-entity response (`GET /parties/{id}`, `/units/{id}`). UNVERIFIED shape: only a top-level string `name` counts. */
 export function extractEntityName(res: Fetched<unknown>): Fetched<string> {

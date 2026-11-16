@@ -49,6 +49,9 @@ export class FakeBotRest implements DiscordBotRest {
   async listChannels(g: string) { return this.down ? null : this.channels.get(g) ?? []; }
   async listRoles(g: string) { return this.down ? null : this.roles.get(g) ?? null; }
   async botTopRolePosition(g: string) { return this.down ? null : this.top.get(g) ?? 0; }
+  /** `guild:user` -> role ids the member holds (what the bot would read from Discord). Absent = unknown member. */
+  members = new Map<string, string[]>();
+  async memberRoles(g: string, u: string) { return this.down ? null : this.members.get(`${g}:${u}`) ?? null; }
 }
 export const role = (id: string, position: number, over: Partial<DiscordRole> = {}): DiscordRole => ({ id, name: `role-${id}`, position, managed: false, color: 0, permissions: '0', ...over });
 

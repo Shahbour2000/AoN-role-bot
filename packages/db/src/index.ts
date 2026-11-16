@@ -9,3 +9,4 @@ export * from './sessions-repo.js';
 export * from './global-links-repo.js';
 export * from './verification-repo.js';
 export * from './panel-repo.js';
+export * from './admin-roles-repo.js';

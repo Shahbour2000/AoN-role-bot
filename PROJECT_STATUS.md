@@ -1,6 +1,6 @@
 # AoN Role Bot — project status
 
-Updated for **Delivery A: customizable verification ticket panel published from the dashboard** (on top of Phase 1, global linking + company-verification tickets). Base: the repository as uploaded after the dashboard hotfix
+Updated for **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
 (no `.git` metadata in the upload, so no commit hash can be stated). Statuses: **COMPLETE** implemented and verified · **PARTIAL** implemented but
 incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evidence") · **BLOCKED** genuine external limitation · **NOT STARTED**.
 
@@ -10,12 +10,40 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 ## Roadmap requested by the owner (priority order) — where each item stands
 | # | Requirement | Status |
 |---|---|---|
-| 1 | Verification dashboard: settings, publish panel from the dashboard, customization, stats/history, localization | **Delivery A below: implemented, tested on mocks/PGlite/PG16/jsdom; never run on real Discord** (stats, channel selector, history and translations were already fixed in the previous delivery and are untouched) |
-| 2 | Proxy countries | NOT STARTED |
-| 3 | Country-wide party / military-unit identification roles | NOT STARTED |
-| 4 | Searchable role / party / unit / country selectors | NOT STARTED (an earlier partial picker exists, see Phase 2/3 tables) |
-| 5 | Trusted bot administrators (roles other than Discord Administrator) | NOT STARTED. The dashboard gate is a single function, so this plugs in later. |
-| 6 | Guild-level lock shared by server-type change and mapping update; stale-response protection in entity pickers | NOT STARTED (known issues A and B) |
+| 1 | Verification dashboard + customizable ticket panel published from the dashboard | **COMPLETE — accepted by the owner after testing on the live Discord server (Delivery A)**. A stray "null" text seen in the owner's screenshots was fixed in Delivery B. |
+| 2 | Proxy countries | **Delivery B: implemented; tested on mock / PGlite / PG16 / jsdom. Not yet run on real Discord.** |
+| 3 | Country-wide party / military-unit identification roles | **Delivery B: implemented; same evidence level.** Depends on two unverified API facts, see "Known limitations". |
+| 4 | Searchable role / party / unit / country selectors | **Delivery B: role picker (real names + colours) and image-or-initials entity pickers.** Role picker is used on the Roles, Builds, Ranks, Country-roles and Bot-administrators pages. |
+| 5 | Trusted bot administrators | **Delivery B: implemented (dashboard + slash commands); never run on real Discord.** |
+| 6 | Guild-level lock (server type vs mappings); stale-response protection in pickers | **Delivery B: both fixed.** Lock proven on real PostgreSQL 16 (red/green); stale fix has a red/green test for one of two scenarios. |
+| – | Phase 3-6 items from the older plan (nickname sync, build roles formula, alliance, …) | unchanged, see the older phase tables below |
+
+## Delivery B — this delivery
+| Requirement | What exists now | Status | Evidence |
+|---|---|---|---|
+| Migration 0011 | additive: kind list only grows; indexes cover only new kinds; new table `bot_admin_roles` | COMPLETE (code) | `db/test/migrate.test.ts`; `proxy-identity-admin.test.ts` (PGlite **and PG16**) |
+| **Proxy countries**: add / edit (replace role) / remove, multiple, country chosen from the game's country list, one dedicated role per country | stored as role mappings of kind `proxy_citizen` (game reference = country id) with replace semantics; dashboard page *Country roles*; `GET/PUT/DELETE /api/guilds/:g/proxy-countries[/:id]` | UNVERIFIED | db 15 (PGlite+PG16), web API 15, jsdom 19, sync 21 |
+| Proxy sync: nationality = proxy country ⇒ proxy role; never the citizen role; survives later syncs; never removed when the lookup fails; unrelated roles untouched; scheduled + manual + single-user; global link untouched | `proxy_citizen` evaluation in `member-sync.ts` (uses the player's CURRENT in-game country) | UNVERIFIED | `sync/test/proxy-identity.test.ts`: citizen/proxy swap, idempotency (no Discord calls on re-run), failures (500, rate limit, not found, incomplete), guild-wide run, cross-server isolation |
+| A proxy role cannot be the citizen role, another proxy/identity role, or a military-rank role; proxy ≠ own country; only country servers | enforced in the database transaction (and again in the API) | COMPLETE (code) | db + API tests |
+| **Country-wide party roles**: Party Member (any party of the server's country, any rank), Party President | kinds `country_party_member` / `country_party_president`, evaluated against the country's own party list (`/countries/{id}/parties`) | UNVERIFIED | sync tests: any party, any rank, foreign party grants nothing, stale roles removed, president via list or profile, failures never remove |
+| **Country-wide unit roles**: Unit Member / Leader / Owner | kinds `country_unit_*`, evaluated against the country's unit list (`/countries/{id}/units`: `countryId`, `ownerId`); **nationality is never used** | UNVERIFIED | sync tests: Egyptian citizen in a foreign unit gets nothing; foreign national in an Egyptian unit does; owner of a foreign unit gets nothing; list with gaps can grant but never remove |
+| Separate from party-server / unit-server mappings | new kinds are rejected for those server types; their own member/leader/role mappings are unchanged | COMPLETE (code) | sync + db tests |
+| Party/unit lists fetched once per run, failures not cached | `memoizeCountryData` (in-flight promise cached) | COMPLETE (code) | 25-member guild run ⇒ 1 request each |
+| **Role picker**: real name, real Discord colour, search, only this server's roles, blocked roles disabled, keyboard | `AON.rolePicker`; drop-in for the old `<select>` (same `.value` / `change`), also keeps unsaved choices across a language switch | UNVERIFIED | jsdom |
+| **Entity pickers**: name, image when the API gives one, otherwise initials; parties/units filtered by country | units: `logoUrl` only if an absolute https URL; parties/countries: **no image field exists in any API sample** ⇒ initials | PARTIAL | jsdom; see limitation 3 |
+| **Trusted bot administrators**: roles chosen in the dashboard, add/remove, view; audited | table `bot_admin_roles`; roles read from Discord by the bot, never from the browser; works in the dashboard and in slash commands | UNVERIFIED | db 3, web API 8, bot 3, jsdom 3 |
+| Trusted scope (exact) | see `docs/COUNTRY_ROLES_AND_ADMINS.md`. Trusted = everything the dashboard/commands offer EXCEPT: changing the trusted roles, server type/country/party/unit, releasing the country. Grants no Discord permission. | COMPLETE (code) | API tests (`owner_only`) |
+| **Concurrency**: mapping writes and server-type changes share the guild row lock; kind re-checked under the lock | `lockGuild()` in `guild-repo.ts`, used by `addRoleMapping`, `removeRoleMapping`, `setProxyCountry`, `removeProxyCountry`, `setIdentityRole`, `addAdminRole` and `updateGuildSettings` | COMPLETE | **PG16**: race test fails without the fix, passes with it. PGlite is single-connection, so it cannot prove this. |
+| **Stale-response protection** in entity pickers | `refresh()` now invalidates in-flight requests; sequence guard + debounce kept | PARTIAL | jsdom with controllable promises: one scenario red/green; the country-switch scenario passes with or without the fix (a new load already supersedes the old); loading/empty/error/retry and debounce tested. No real browser. |
+| Regression fixed: literal "null" shown on pages | null children are filtered before `replaceChildren` (3 places) | COMPLETE | red/green jsdom test |
+
+**Known limitations / unverified assumptions (Delivery B)**
+1. The party/unit **list shapes are real samples** (`leaderId`; `countryId`, `ownerId`), but the exact meaning of `/countries/{id}/units` ("units owned by that country") and the profile role words (`leader`, `commander`) come from the same samples and have not been checked live.
+2. If a unit has no `ownerId` or `countryId`, the bot can still *grant* roles but will never *remove* them (it treats that as unknown). So an incomplete API response is safe, but roles may linger until the data is complete.
+3. **Images:** only units can have one (`logoUrl`, null in the only sample). A relative path is ignored. The dashboard may load images only from the game API host and the optional media host (no new setting). Parties and countries have no image field in any sample.
+4. A proxy mapping that is removed stops being managed: members keep the Discord role until it is removed by hand.
+5. Trusted-role membership is cached for 15 seconds per user on the dashboard; slash commands use the interaction's own role list.
+6. Never run against real Discord, the live game API, a real browser or production.
 
 ## Delivery A — verification ticket panel (this delivery)
 | Requirement | What exists now | Status | Evidence (backend) |
@@ -61,12 +89,12 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 ## Phase 2 — proxy countries and country-server identification roles
 | Item | Status | Notes |
 |---|---|---|
-| Proxy Countries section (add/remove, country picker from API list, proxy-citizen role) | NOT STARTED | rule now defined (proxy country belongs to Egypt; citizens keep Egyptian server access; Proxy Citizen role) |
-| Proxy removal reconciliation | NOT STARTED | design needed: never delete unrelated roles |
-| Country server: Party Member / Party President (any party of the server's country) | NOT STARTED | today's `party_member`/`party_leader` are bound to ONE party. Needs party→country index from `/countries/{c}/parties` |
-| Country server: Unit Member (ANY unit, any country) / Unit Leader / Unit Owner (units of the server's country only) | NOT STARTED | needs `/countries/{c}/units` (`countryId`, `ownerId`); no `unit_owner` kind exists |
-| Discord role selector with real colours | NOT STARTED | `/roles` API returns `color`; UI is a plain `<select>` |
-| Party/unit selectors with logos, country-filtered | PARTIAL | searchable pickers exist; **no verified logo field** → initials fallback to be built |
+| Proxy Countries section | see Delivery B | implemented in Delivery B |
+| Proxy removal reconciliation | by design | removing a proxy country un-manages its role; nothing is deleted from members |
+| Country server: Party Member / Party President | see Delivery B | implemented in Delivery B |
+| Country server: Unit Member / Unit Leader / Unit Owner | see Delivery B | implemented in Delivery B (only units OWNED by the server's country qualify) |
+| Discord role selector with real colours | see Delivery B | implemented in Delivery B |
+| Party/unit selectors with logos, country-filtered | PARTIAL | filtered + searchable; units show `logoUrl` when it is an https URL; parties have no image field → initials |
 
 ## Phase 3 — setup and configuration
 | Item | Status | Notes |
@@ -81,14 +109,14 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 ## Phase 4 — bot administrators and synchronisation
 | Item | Status | Notes |
 |---|---|---|
-| Trusted bot-administrator roles (bot + dashboard) | NOT STARTED | |
+| Trusted bot-administrator roles (bot + dashboard) | see Delivery B | implemented in Delivery B |
 | Nickname synchronisation | NOT STARTED | needs Manage Nicknames + hierarchy rules |
 | Role reconciliation, manual (`/sync`) and scheduled sync, history | UNVERIFIED | durable scheduler + tests (mock/PGlite/PG16); never run on real Discord |
 | War / Economy / Hybrid build roles | PARTIAL / BLOCKED | code + migration 0007 exist; the real profile sample has no `skills`, formula provisional |
 | Military rank roles | UNVERIFIED | strong tests, never on real Discord |
 | Government office roles | UNVERIFIED | foreign-minister raw value unknown |
 | Party-specific roles (leader, member, Treasurer, Council) | PARTIAL | Treasurer/Council need the game's role value (admin enters it) |
-| Unit-specific roles (Member, Leader, **Owner**) | PARTIAL | Owner kind missing |
+| Unit-specific roles (Member, Leader, **Owner**) | PARTIAL | per-unit Member/Leader exist; country-wide Owner exists (Delivery B); a per-unit Owner mapping does not |
 
 ## Phase 5 — dashboard and management
 | Item | Status | Notes |
@@ -106,13 +134,13 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | Multi-server isolation, server-side authorisation, CSRF | COMPLETE (sandbox) | API/auth tests incl. new routes; never pen-tested |
 | Dockerfile / deployment | UNVERIFIED | never built |
 
-## Test results of this delivery (Delivery A)
+## Test results of this delivery (Delivery B)
 | Suite | Backend | Result |
 |---|---|---|
 | typecheck, 6 packages | – | clean |
-| core / aon-client | pure | 103 / 66 passed |
-| sync | PGlite; PG16 | 96 passed; 96 passed |
-| bot | PGlite; PG16 | 104 passed; 104 passed |
-| db | PGlite; PG16 | 114 passed; 114 passed |
-| web | PGlite | 219 passed (8 files) |
-Not run: real Discord, live game API, real browser, production host. The previous delivery's web baseline had one crashed worker when six suites ran in parallel; suites were run one package at a time here.
+| core / aon-client | pure | 103 / 68 passed |
+| db | **PG16** (+ PGlite for the new files) | 129 passed |
+| sync | **PG16** (+ PGlite for the new file) | 117 passed |
+| bot | **PG16** | 107 passed |
+| web | **PG16** (+ PGlite for the new files) | 254 passed (10 files) |
+Not run: real Discord, live game API, a real browser, the production host. Test-file changes to existing tests: 8 UI tests that assumed a native role `<select>` now use the picker's DOM; 2 tests expect 12 nav items instead of 10; 3 sync tests that created alliance mappings through the API now insert them as legacy rows (the database now refuses a kind the server type does not allow, as the dashboard API always did).

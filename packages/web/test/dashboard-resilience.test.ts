@@ -130,7 +130,7 @@ describe('verification page', () => {
     (root.querySelector('#vf-channel') as HTMLSelectElement).value = '700003'; (root.querySelector('#vf-save') as HTMLElement).click();
     await settle(() => calls.some((c) => c.method === 'PUT'));
     const put = calls.find((c) => c.method === 'PUT')!; expect(JSON.parse(put.body!)).toEqual({ verificationChannelId: '700003' });
-    expect(w.document.querySelectorAll('#nav a').length).toBe(10);
+    expect(w.document.querySelectorAll('#nav a').length).toBe(12);
   });
   it('a failing or malformed panel-editor response leaves statistics, channel selector and history working (only the editor shows a notice)', async () => {
     for (const panelRes of [() => bad(503, 'discord_unavailable'), () => ok({}), () => ok({ settings: {}, defaults: {}, limits: {}, styles: 'x' })]) {

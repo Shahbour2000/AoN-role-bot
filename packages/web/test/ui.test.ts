@@ -8,6 +8,11 @@ import { ADMIN, BASE, guildInfo, login, makeApp, role, type Ctx, type Login } fr
 const PUB = join(__dirname, '..', 'public');
 const G1 = '100000001', G2 = '100000002';
 const read = (f: string) => readFileSync(join(PUB, f), 'utf8');
+type Win = Window & typeof globalThis;
+/** The role picker replaced the native role <select>: its options are `li[role=option]` and a disabled one has aria-disabled="true". */
+const ropts = (scope: Element | Document): HTMLElement[] => [...scope.querySelectorAll('.rolepick li[role="option"]')] as HTMLElement[];
+const ropt = (scope: Element | Document, id: string) => ropts(scope).find((o) => o.getAttribute('data-role-id') === id)!;
+const rdisabled = (o: Element) => o.getAttribute('aria-disabled') === 'true';
 
 interface Page { dom: JSDOM; doc: Document; win: Window & typeof globalThis; $: (s: string) => Element | null; $$: (s: string) => Element[]; calls: { method: string; url: string; status: number; body?: string }[] }
 async function waitFor<T>(fn: () => T | null | undefined | false, label: string, ms = 8000): Promise<T> {
@@ -120,7 +125,7 @@ describe('dashboard UI against the real backend (jsdom)', () => {
     expect(save().disabled).toBe(true);
     const cb = rowOf(p, 'major').querySelector('input[type="checkbox"]') as HTMLInputElement; cb.checked = false; cb.dispatchEvent(new p.win.Event('change', { bubbles: true }));
     expect(save().disabled).toBe(false);                             // disabled ranks are excluded from ordering
-    const sels = ['corporal', 'sergeant'].map((k) => rowOf(p, k).querySelector('select') as HTMLSelectElement);
+    const sels = ['corporal', 'sergeant'].map((k) => rowOf(p, k).querySelector('.rolepick') as unknown as HTMLSelectElement);
     for (const s of sels) { s.value = '900001'; s.dispatchEvent(new p.win.Event('change', { bubbles: true })); }
     expect(save().disabled).toBe(true); expect(rowOf(p, 'sergeant').querySelector('.errs')!.textContent).toContain('نفس رتبة ديسكورد');
   });
@@ -128,9 +133,9 @@ describe('dashboard UI against the real backend (jsdom)', () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/ranks`);
     await waitFor(() => p.$$('tr[data-key]').length === 17, 'rows');
     expect(rowOf(p, 'soldier').querySelector('.hint')!.textContent).toContain('لم تُربط');
-    const opts = [...rowOf(p, 'soldier').querySelectorAll('option')].map((o) => o.textContent!);
-    expect(opts.some((t) => t.includes('900003') || t.includes('role-900003'))).toBe(true);
-    expect(opts.find((t) => t.includes('role-900003'))).toContain('⚠');
+    const opts = ropts(rowOf(p, 'soldier'));
+    expect(opts.some((o) => o.textContent!.includes('role-900003'))).toBe(true);
+    expect(opts.find((o) => o.textContent!.includes('role-900003'))!.querySelector('.badge.warn')).not.toBeNull();       // "the bot cannot manage it" is shown as a warning badge
   });
   it('server-side rejection (422) is shown on the offending row and nothing is silently accepted', async () => {
     const { c, l } = await setup();
@@ -157,7 +162,7 @@ describe('dashboard UI against the real backend (jsdom)', () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/roles`);
     await waitFor(() => p.$('.card select'), 'form');
     const [kind, , ] = p.$$('.card select') as HTMLSelectElement[]; kind!.value = 'president';
-    const roleSel = p.$$('.card select')[1] as HTMLSelectElement; roleSel.value = '900001';
+    const roleSel = p.$('.card .rolepick') as unknown as HTMLSelectElement; roleSel.value = '900001';
     click(p, [...p.$$('button')].find((b) => b.textContent === 'إضافة ربط')!);
     await waitFor(() => p.$$('tbody tr').length === 1, 'mapping row');
     expect(p.$('tbody tr')!.textContent).toContain('الرئيس');
@@ -238,7 +243,7 @@ describe('role mappings page', () => {
     const { c, l } = await setup();
     await c.db.query(`INSERT INTO sync_jobs (guild_id, kind, status, finished_at, counts, details) VALUES ($1,'all','succeeded', now(), '{}'::jsonb, $2::jsonb)`, [G1, JSON.stringify({ seenRoles: { party: { leader: 1, treasurer: 2 }, unit: {}, governmentUnknown: ['ministerForeign'] } })]);
     const p = await openApp(c, l, `#/g/${G1}/roles`); await waitFor(() => p.$('#map-kind'), 'form');
-    const kind = p.$('#map-kind') as HTMLSelectElement; const role = p.$$('.card select')[1] as HTMLSelectElement; const add = [...p.$$('button')].find((b) => b.textContent === 'إضافة ربط')!;
+    const kind = p.$('#map-kind') as HTMLSelectElement; const role = p.$('.card .rolepick') as unknown as HTMLSelectElement; const add = [...p.$$('button')].find((b) => b.textContent === 'إضافة ربط')!;
     kind.value = 'party_role'; kind.dispatchEvent(new p.win.Event('change', { bubbles: true })); role.value = '900001';
     expect([...p.$$('#seen-values button')].map((b) => b.textContent)).toEqual(['leader', 'treasurer']);
     click(p, add); await waitFor(() => p.$('.toast.bad'), 'needs value'); expect(p.$('.toast.bad')!.textContent).toContain('يتطلب قيمة'); expect(p.calls.filter((x) => x.method === 'POST')).toHaveLength(0);
@@ -253,10 +258,10 @@ describe('role mappings page', () => {
     c.bot.roles.set(G1, [...c.bot.roles.get(G1)!, role('930001', 3, { permissions: String(0x8) })]);
     const ranks = await getLadder(c.db, G1); await saveLadder(c.db, G1, ranks.map((r) => (r.key === 'captain' ? { ...r, discordRoleId: '900002' } : r)), null);
     const p = await openApp(c, l, `#/g/${G1}/roles`); await waitFor(() => p.$('#map-kind'), 'form');
-    const options = [...(p.$$('.card select')[1] as HTMLSelectElement).options];
-    expect(options.find((o) => o.value === '930001')!.disabled).toBe(true); expect(options.find((o) => o.value === '930001')!.textContent).toContain('غير مسموحة');
-    expect(options.find((o) => o.value === '900002')!.disabled).toBe(true); expect(options.find((o) => o.value === '900002')!.textContent).toContain('مستخدمة في ربط آخر');
-    expect(options.find((o) => o.value === '900001')!.disabled).toBe(false);
+    const scope = p.$('.card .rolepick')!.parentElement!;
+    expect(rdisabled(ropt(scope, '930001'))).toBe(true); expect(ropt(scope, '930001').textContent).toContain('غير مسموحة');
+    expect(rdisabled(ropt(scope, '900002'))).toBe(true); expect(ropt(scope, '900002').textContent).toContain('مستخدمة في ربط آخر');
+    expect(rdisabled(ropt(scope, '900001'))).toBe(false);
   });
 });
 
@@ -284,8 +289,8 @@ describe('military-rank editor: optional system, reorder, deletion', () => {
     const { c, l } = await setup(); await c.app.inject({ method: 'POST', url: `/api/guilds/${G1}/mappings`, headers: { ...l.headers, cookie: `aon_session=${l.cookies['aon_session']}`, 'content-type': 'application/json' }, payload: JSON.stringify({ kind: 'president', discordRoleId: '900001' }) });
     const p = await openApp(c, l, `#/g/${G1}/ranks`, (url, method) => method === 'PUT' && url.endsWith('/ranks') ? { status: 409, body: { error: 'sync_running' } } : null);
     await waitFor(() => p.$$('tr[data-key]').length === 17, 'rows');
-    const opt = [...rowOf(p, 'soldier').querySelectorAll('option')].find((o) => (o as HTMLOptionElement).value === '900001') as HTMLOptionElement;
-    expect(opt.disabled).toBe(true); expect(opt.textContent).toContain('مستخدمة في ربط آخر');
+    const opt = ropt(rowOf(p, 'soldier'), '900001');
+    expect(rdisabled(opt)).toBe(true); expect(opt.textContent).toContain('مستخدمة في ربط آخر');
     type(p, dmgInput(p, 'captain'), '6000000'); click(p, [...p.$$('button')].find((b) => b.textContent === 'حفظ التغييرات')!);
     click(p, [...(await waitFor(() => p.$('.overlay .dialog'), 'dialog')).querySelectorAll('button')].find((b) => b.textContent === 'تأكيد')!);
     await waitFor(() => p.$('.toast.bad'), 'toast'); expect(p.$('.toast.bad')!.textContent).toContain('أثناء مزامنة جارية');
@@ -422,7 +427,7 @@ describe('player build roles page', () => {
   it('roles used as military ranks or mappings are not selectable', async () => {
     const { c, l } = await setup(); await c.app.inject({ method: 'POST', url: `/api/guilds/${G1}/mappings`, headers: { ...l.headers, cookie: `aon_session=${l.cookies['aon_session']}`, 'content-type': 'application/json' }, payload: JSON.stringify({ kind: 'president', discordRoleId: '900002' }) });
     const p = await openApp(c, l, `#/g/${G1}/builds`); await waitFor(() => p.$('#build-war'), 'form');
-    expect((([...sel(p, 'war').options].find((o) => o.value === '900002')) as HTMLOptionElement).disabled).toBe(true);
+    expect(rdisabled(ropt(sel(p, 'war'), '900002'))).toBe(true);
   });
 });
 
@@ -432,13 +437,13 @@ describe('app shell (sidebar, server switcher, mobile drawer, page header)', () 
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/builds`);
     await waitFor(() => p.$('#build-war'), 'builds page');
     const groups = p.$$('#nav .nav-group h4').map((h) => h.textContent); expect(groups).toEqual(['عام', 'الرتب', 'المجتمع', 'التشغيل']);
-    const links = p.$$('#nav a'); expect(links.length).toBe(10); expect(links.every((a) => a.querySelector('svg.icon'))).toBe(true);
+    const links = p.$$('#nav a'); expect(links.length).toBe(12); expect(links.every((a) => a.querySelector('svg.icon'))).toBe(true);
     const cur = p.$$('#nav a[aria-current="page"]'); expect(cur.length).toBe(1); expect((cur[0] as HTMLAnchorElement).getAttribute('href')).toBe(`#/g/${G1}/builds`);
     expect(p.$('.page-head h2')!.textContent).toBe('أدوار البناء'); expect(p.$('.page-head p')!.textContent!.length).toBeGreaterThan(5);
   });
   it('server switcher shows the current server and offers the other installed servers plus "all servers"', async () => {
     const { c, l } = await setup(); const p = await openApp(c, l, `#/g/${G1}/overview`);
-    await waitFor(() => p.$('#switcher .name'), 'switcher'); expect(p.$('#switcher .name')!.textContent).toBe(`Guild ${G1}`);
+    await waitFor(() => p.$('#switcher .name')?.textContent === `Guild ${G1}`, 'switcher shows the current server (the name is known once the server list has loaded)'); expect(p.$('#switcher .name')!.textContent).toBe(`Guild ${G1}`);
     const menu = p.$('#switcher .menu') as HTMLElement; expect(menu.hidden).toBe(true);
     click(p, p.$('#switcher > button')); expect(menu.hidden).toBe(false); expect(p.$('#switcher > button')!.getAttribute('aria-expanded')).toBe('true');
     const hrefs = [...menu.querySelectorAll('a')].map((a) => a.getAttribute('href')); expect(hrefs).toEqual([`#/g/${G2}/overview`, '#/']);   // current guild and the not-installed one are not listed

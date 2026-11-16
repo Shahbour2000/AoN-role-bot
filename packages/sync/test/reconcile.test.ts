@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { claimDueGuilds, getSyncStatus, listSyncJobs, startSyncJob, updateGuildSettings } from '@aon/db';
 import { classifyDiscordError, syncGuild, syncOneUser, type GuildSyncDeps } from '../src/index.js';
-import { ROLE, citizensOf, discordErr, httpErr, link, map, noSleep, profileOf, rankRole, rosterOf, setup } from './harness.js';
+import { ROLE, citizensOf, discordErr, httpErr, link, map, noSleep, profileOf, rankRole, rosterOf, setup, legacyMap } from './harness.js';
 
 type H = Awaited<ReturnType<typeof setup>>;
 const run = async (h: H, user = 'd1', g = 'A') => {
@@ -234,7 +234,7 @@ describe('job results, logging and retry scheduling', () => {
   it('records roles added/removed, skip reasons and failed lookups; logs start and end with counts', async () => {
     const h = await setup(); const logs: string[] = [];
     await updateGuildSettings(h.db, 'A', { modules: { government: true, party: false, unit: false, alliance: true, ranks: true } }, null);
-    await map(h.db, 'A', 'president', ROLE.pres); await map(h.db, 'A', 'alliance_member', ROLE.ally);
+    await map(h.db, 'A', 'president', ROLE.pres); await legacyMap(h.db, 'A', 'alliance_member', ROLE.ally);
     for (const n of [1, 2, 3]) { await link(h.db, 'A', `d${n}`, `p${n}`); }
     h.discord.give('A', 'd1'); h.discord.give('A', 'd2', ROLE.pres); /* d3 left the server */
     roster(h, [{ userId: 'p1', role: 'president' }, { userId: 'p9', role: 'congress' }]);

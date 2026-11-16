@@ -14,7 +14,7 @@ describe('entity options', () => {
     const p = extractParties(ok(parties)); const u = extractUnits(ok(units));
     expect(p.status === 'ok' && partyOptions(p.data)).toEqual([{ id: 'pty_66rrvzjjnzub3gr7', name: 'Ummah Caliphate Party' }, { id: 'pty_ngnxi04pbn7v8jkr', name: 'The National Party Of EGYPT NPE' }]);
     expect(u.status === 'ok' && unitOptions(u.data).map((x) => x.name)).toEqual(['ALQAHERA', 'Black Flags']);
-    expect(unitOptions([{ id: 'x', name: null, countryId: null, ownerId: null, ownerName: null, members: null, capacity: null, joinPolicy: null }])).toEqual([]);
+    expect(unitOptions([{ id: 'x', name: null, countryId: null, ownerId: null, ownerName: null, members: null, capacity: null, joinPolicy: null, logoUrl: null }])).toEqual([]);
     for (const o of [...partyOptions(p.status === 'ok' ? p.data : []), ...unitOptions(u.status === 'ok' ? u.data : [])]) expect(Object.keys(o).sort()).toEqual(['id', 'name']);
   });
   it('country options (UNVERIFIED shape, synthetic fixture) are sorted A–Z; unknown shapes are incomplete, never guessed', () => {
@@ -45,5 +45,17 @@ describe('AonClient entity methods', () => {
   });
   it('countryOptions reads GET /countries through the tolerant extractor', async () => {
     const h = client([{ id: 'eg', name: 'Egypt' }]); const r = await h.c.countryOptions(); expect(r.status === 'ok' && r.data).toEqual([{ id: 'eg', name: 'Egypt' }]); expect(new URL(h.calls[0]!).pathname).toBe('/api/v1/countries');
+  });
+});
+
+describe('entity images (units): only an absolute https logo is ever used', () => {
+  it('maps logoUrl to imageUrl for https URLs and ignores everything else (relative paths, http, credentials, non-strings)', () => {
+    const mk = (logoUrl: unknown) => extractUnits({ status: 'ok', data: [{ id: 'u1', name: 'U', countryId: 'eg', ownerId: 'o', logoUrl }] });
+    const img = (v: unknown) => { const r = mk(v); return r.status === 'ok' ? unitOptions(r.data)[0]!.imageUrl : 'ERR'; };
+    expect(img('https://cdn.example.com/a.webp')).toBe('https://cdn.example.com/a.webp');
+    for (const bad of [null, undefined, '', '/media/a.webp', 'http://cdn.example.com/a.webp', 'https://u:p@cdn.example.com/a.webp', 'javascript:alert(1)', 5, {}]) expect(img(bad), String(bad)).toBeUndefined();
+  });
+  it('parties and countries never carry an image (no verified field)', () => {
+    expect(partyOptions([{ id: 'p', name: 'P', leaderId: null, leaderName: null, members: null, ruling: null }])[0]).toEqual({ id: 'p', name: 'P' });
   });
 });

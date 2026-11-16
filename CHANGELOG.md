@@ -1,5 +1,22 @@
 # Changelog
 
+## Delivery B — proxy countries, country-wide party/unit roles, pickers, trusted bot administrators, concurrency fix
+**Added**
+- **Proxy countries** (dashboard page *Country roles*): add several, pick each country from the game's list, one dedicated Discord role per country, edit and remove. Synchronisation gives the proxy role to players whose current nationality is a proxy country; they are never given the citizen role; nothing is removed when a lookup fails.
+- **Country-wide roles** for country servers: Party Member, Party President, Unit Member, Unit Leader, Unit Owner. A party/unit counts only if it belongs to the server's country (from the country's own lists); nationality is never used for units, so an Egyptian in a foreign unit gets nothing. Separate from the per-party / per-unit roles of party and unit servers.
+- **Role picker** (name + real Discord colour, search, keyboard, blocked roles disabled) replacing the native role dropdowns on every page; entity pickers show a unit logo when the API gives an https one, otherwise initials.
+- **Trusted bot administrators** (dashboard page *Bot administrators*): chosen roles may manage the bot in the dashboard and slash commands without any Discord permission. They may not change the trusted roles, the server type/country/party/unit, or release the country. All changes audited.
+- Migration `0011` (additive): new role kinds, indexes for the new kinds, table `bot_admin_roles`.
+**Fixed**
+- Mapping writes and server-type changes now take the same guild row lock and re-check the kind against the server type inside the transaction (a concurrent update could previously bypass the type restriction). Proven on PostgreSQL 16.
+- Entity picker: switching the country filter now discards in-flight requests.
+- A literal "null" no longer appears on the Overview page or in the panel status row (null children were passed to `replaceChildren`).
+- The language switch keeps an unsaved role choice (needed because the role picker is not a native control).
+**Changed**
+- `addRoleMapping` refuses proxy/identity kinds (they use their own replace-semantics functions) and kinds the server type does not allow.
+- Slash-command "not allowed" message mentions the trusted bot-administrator role.
+**Unchanged:** Delivery A (verification panel), global linking, company-name verification, the ticket flow.
+
 ## Delivery A — customizable verification ticket panel, publishable from the dashboard
 **Added**
 - Panel settings (title, description, colour, footer, thumbnail link, button text/emoji/colour, default-text language), stored per server in `verification_panels` (migration `0010`, additive).

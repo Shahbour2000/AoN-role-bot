@@ -3,8 +3,7 @@ import type { Fetched } from '@aon/core';
 import type { HttpStats, PlayerIdentity, ProfileCard, StatsCard } from '@aon/client';
 import {
   claimLink, ensureGuild, ensureGuildLink, findLinkForUser, forceLink, getGlobalLinkForUser, unlinkGlobalSelf, getGuildConfig, getLadder, listActiveLinks, listPendingLinks, listRoleMappings, reviewLink, unlinkWithRoles,
-  getPendingAttemptForUser, audit, type Db,
-} from '@aon/db';
+  getPendingAttemptForUser, audit, type Db, hasAdminRole } from '@aon/db';
 import { publishVerificationPanel, syncGuild, syncOneUser, type DiscordGateway, type PanelPublisher, type GameData, type GuildSyncDeps, type UserSyncResult } from '@aon/sync';
 import { t, type Lang, type MsgKey } from './messages.js';
 import { buildProfileEmbed, type EmbedJson } from './profile-card.js';
@@ -24,6 +23,8 @@ export interface Invocation {
   guildId: string | null; guildName: string; userId: string;
   /** Computed by Discord for this interaction (ManageGuild or Administrator). Authoritative; never taken from options. */
   canManageGuild: boolean;
+  /** The caller's role ids in THIS server, as Discord reports them for this interaction (used for the trusted bot-administrator roles). Never taken from options. */
+  memberRoleIds?: readonly string[];
   group: string | null; sub: string;
   str(name: string): string | undefined; user(name: string): string | undefined; bool(name: string): boolean | undefined;
   /** `public: true` makes the (deferred) reply visible to the channel; everything else is private to the caller. */
@@ -33,7 +34,7 @@ export interface Invocation {
 }
 export interface ModalSpec { id: string; title: string; fieldId: string; label: string; maxLength: number }
 export interface ButtonInvocation {
-  guildId: string | null; userId: string; canManageGuild: boolean; customId: string;
+  guildId: string | null; userId: string; canManageGuild: boolean; memberRoleIds?: readonly string[]; customId: string;
   update(r: Reply): Promise<void>;
   /** Acknowledge now, answer later with `update` (Discord allows 3 s; game-API checks can take longer). */
   deferUpdate?(): Promise<void>;
@@ -99,7 +100,8 @@ export async function handleCommand(deps: BotDeps, inv: Invocation): Promise<voi
   await onGuildInstalled(deps.db, inv.guildId, inv.guildName);
   const cfg = (await getGuildConfig(deps.db, inv.guildId))!;
   const lang = cfg.language;
-  const needAdmin = async () => { if (inv.canManageGuild) return true; await inv.reply({ content: t(lang, 'not_admin') }); return false; }; // enforced server-side, per call
+  // Manage Server / Administrator (as computed by Discord for this interaction) OR a trusted bot-administrator role of this server. Enforced server-side, per call.
+  const needAdmin = async () => { if (inv.canManageGuild || (!!inv.guildId && (await hasAdminRole(deps.db, inv.guildId, inv.memberRoleIds ?? [])))) return true; await inv.reply({ content: t(lang, 'not_admin') }); return false; };
 
   switch (`${inv.group}/${inv.sub}`) {
     case 'link/link': case 'verify/verify': {   // `/link` is now an alias: it starts verification (a name-only claim is no longer accepted)
@@ -283,7 +285,7 @@ export async function handleButton(deps: BotDeps, inv: ButtonInvocation): Promis
     return inv.update({ content: t(lang, 'unlink_self_done', { n }) });
   }
   if (kind === 'fl' && p.kind === 'force') {
-    if (!inv.canManageGuild) return inv.update({ content: t(lang, 'not_admin') }); // re-checked at click time
+    if (!inv.canManageGuild && !(!!inv.guildId && (await hasAdminRole(deps.db, inv.guildId, inv.memberRoleIds ?? [])))) return inv.update({ content: t(lang, 'not_admin') }); // re-checked at click time
     pending.delete(tk!);
     const r = await forceLink(deps.db, { guildId: inv.guildId, adminId: p.adminId, discordUserId: p.targetUserId, playerId: p.playerId, username: p.username, replace: p.replace, ...(p.reason ? { reason: p.reason } : {}) });
     if (!r.ok) return inv.update({ content: t(lang, r.code === 'GLOBAL_CONFLICT' ? 'vt_player_taken' : 'force_conflict') });

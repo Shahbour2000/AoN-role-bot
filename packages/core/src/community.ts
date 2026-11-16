@@ -3,7 +3,7 @@
  * and the database layer (atomic removal on a confirmed type change); the dashboard receives the result from the API.
  *
  * Rules (original brief):
- *  - country: government offices + citizen, plus the generic party / unit roles
+ *  - country: government offices + citizen, the per-party/unit roles, proxy-citizen roles and the five country identity roles (any party / any unit of the country)
  *  - party:   party leader, party member and game-defined party roles (treasurer, council, ... as the game reports them)
  *  - military_unit: unit leader and unit member
  *  - general: everything except alliance (no verified alliance data exists)
@@ -15,10 +15,17 @@ export type CommunityType = (typeof COMMUNITY_TYPES)[number];
 export const MODULE_KEYS = ['government', 'party', 'unit', 'ranks'] as const;
 export type ModuleKey = (typeof MODULE_KEYS)[number];
 
+/** Country-server identity roles: membership of ANY party / military unit that belongs to the server's country (not tied to one party or unit). */
+export const IDENTITY_KINDS = ['country_party_member', 'country_party_president', 'country_unit_member', 'country_unit_leader', 'country_unit_owner'] as const;
+/** A role for players whose in-game nationality is a configured proxy country (game reference = that country's id). */
+export const PROXY_KIND = 'proxy_citizen';
+export const isIdentityKind = (k: string): boolean => (IDENTITY_KINDS as readonly string[]).includes(k);
+export const isProxyKind = (k: string): boolean => k === PROXY_KIND;
+
 const GOVERNMENT = ['president', 'vice_president', 'minister_defense', 'minister_foreign', 'minister_economy', 'congress', 'government_role'] as const;
 export const KINDS_BY_TYPE: Readonly<Record<CommunityType, readonly string[]>> = {
   general: [...GOVERNMENT, 'citizen', 'party_member', 'party_leader', 'party_role', 'unit_member', 'unit_leader'],
-  country: [...GOVERNMENT, 'citizen', 'party_member', 'party_leader', 'unit_member', 'unit_leader'],
+  country: [...GOVERNMENT, 'citizen', 'party_member', 'party_leader', 'unit_member', 'unit_leader', PROXY_KIND, ...IDENTITY_KINDS],
   party: ['party_leader', 'party_member', 'party_role'],
   military_unit: ['unit_leader', 'unit_member'],
 };

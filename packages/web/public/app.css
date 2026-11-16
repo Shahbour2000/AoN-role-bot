@@ -270,6 +270,24 @@ ul.checks .icon { color: var(--ok); margin-block-start: .25em; }
 @media (max-width: 900px) { .panel-edit { grid-template-columns: minmax(0, 1fr); } .panel-side { position: static; } }
 @media (max-width: 640px) { .panel-edit .pair { grid-template-columns: minmax(0, 1fr); } .panel-actions .btn { flex: 1 1 100%; } }
 
+
+/* ------------------------------------------------------------------ role picker, entity images, country-roles & trusted-admin pages */
+.avatar { position: relative; overflow: hidden; }
+.avatar-img { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; object-fit: cover; background: var(--surface-2, #1b1d2b); }
+.role-dot { flex: none; inline-size: 14px; block-size: 14px; border-radius: 50%; box-shadow: 0 0 0 2px rgba(255, 255, 255, .12); }
+.rolepick .picker-selected { display: flex; align-items: center; gap: .5rem; min-block-size: 2.2rem; }
+.rolepick .picker-name { flex: 1; min-inline-size: 0; overflow-wrap: anywhere; }
+.rolepick .picker-opt { display: flex; align-items: center; gap: .5rem; }
+.rolepick .picker-opt.disabled { opacity: .55; cursor: not-allowed; }
+.rolepick .picker-opt.empty { color: var(--muted); justify-content: center; }
+.rolepick .picker-list { max-block-size: 16rem; overflow-y: auto; }
+.proxy-list { display: grid; gap: var(--sp-3); margin-block: var(--sp-3); }
+.proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: var(--sp-3); align-items: center; }
+.proxy-row .who { display: flex; align-items: center; gap: .6rem; min-inline-size: 0; overflow-wrap: anywhere; }
+.proxy-add { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: var(--sp-3); align-items: end; }
+.id-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: var(--sp-3); }
+@media (max-width: 760px) { .proxy-row, .proxy-add { grid-template-columns: minmax(0, 1fr); } .proxy-row .btn, .proxy-add .btn { inline-size: 100%; } }
+
 /* ------------------------------------------------------------------ 7 motion */
 @keyframes shimmer { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

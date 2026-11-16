@@ -61,17 +61,14 @@
       close = openModal(ov, () => resolve(false), ack);
     });
   }
+  const keep = (x) => x !== null && x !== undefined && x !== false;      // replaceChildren(null) would render the text "null"
   const loading = () => root.replaceChildren(el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }));
   const field = (label, input) => el('div', { class: 'field' }, el('label', { text: label }), input);
   const badge = (text, kind = '') => el('span', { class: `badge ${kind}`, text });
 
   const BLOCKED_REASONS = ['dangerous_permissions', 'everyone_role', 'integration_managed'];
-  function roleSelect(roles, value, withNone = true, usedElsewhere = new Set()) {
-    const label = (r) => (BLOCKED_REASONS.includes(r.reason) ? `${r.name} — ${t('role_blocked')}` : usedElsewhere.has(r.id) && r.id !== value ? `${r.name} — ${t('role_used_elsewhere')}` : r.manageable ? r.name : `${r.name} ⚠ ${t('role_unmanageable')} (${t(`r_${r.reason}`)})`);
-    const sel = el('select', {}, withNone ? el('option', { value: '', text: t('role_none') }) : null,
-      roles.map((r) => el('option', { value: r.id, text: label(r), disabled: BLOCKED_REASONS.includes(r.reason) || (usedElsewhere.has(r.id) && r.id !== value) })));
-    sel.value = value || ''; return sel;
-  }
+  /** Searchable role picker showing each role's real name and colour (drop-in for the old <select>: same `.value`, same `change` event). */
+  function roleSelect(roles, value, withNone = true, usedElsewhere = new Set(), label) { return AON.rolePicker({ roles, value, withNone, usedElsewhere, label }); }
 
   // ---------------------------------------------------------------- routing
   function parseRoute() { const m = location.hash.match(/^#\/g\/(\d{5,25})(?:\/(\w+))?$/); return m ? { guild: m[1], tab: m[2] || 'overview' } : { guild: null }; }
@@ -82,7 +79,7 @@
     let view;
     try { view = r.guild ? await guildShell(r.guild, r.tab, token) : await guildList(token); }
     catch (e) { console.error('dashboard render failed', e); view = [failPanel(t('error_generic'), route)]; }
-    if (token === renderToken && view) root.replaceChildren(...view);
+    if (token === renderToken && view) root.replaceChildren(...view.filter(keep));
   }
 
   // ---------------------------------------------------------------- guild list
@@ -93,14 +90,14 @@
     const gs = res.data.guilds; state.guilds = gs;
     return [el('div', { class: 'page-head' }, el('h2', { text: t('pick_server') }), el('p', { text: t('pd_pick') })),
       gs.length ? el('div', { class: 'grid' }, gs.map((g) => el('div', { class: 'card' },
-        el('h3', {}, icon('server'), ' ', el('bdi', { text: g.name })), g.installed ? badge(t('manage'), 'ok') : badge(t('not_installed'), 'warn'),
+        el('h3', {}, icon('server'), ' ', el('bdi', { text: g.name })), g.installed ? badge(t('manage'), 'ok') : badge(t('not_installed'), 'warn'), g.access === 'trusted' ? badge(t('ad_level_trusted')) : null,
         el('div', { class: 'row' }, g.installed ? el('a', { class: 'btn primary', href: `#/g/${g.id}/overview`, text: t('manage') }) : el('a', { class: 'btn', href: g.inviteUrl, text: t('install') }))))) : el('div', { class: 'empty', text: t('no_servers') })];
   }
 
   // ---------------------------------------------------------------- guild shell (sidebar nav, server switcher, page header)
-  const TABS = ['overview', 'setup', 'verify', 'roles', 'builds', 'ranks', 'players', 'sync', 'audit', 'diag'];
-  const PAGES = { overview, setup, verify: verifyPage, roles: rolesPage, builds: buildsPage, ranks: ranksPage, players, sync: syncPage, audit, diag };
-  const NAV_GROUPS = [['nav_general', ['overview', 'setup', 'verify']], ['nav_roles', ['roles', 'builds', 'ranks']], ['nav_community', ['players']], ['nav_ops', ['sync', 'audit', 'diag']]];
+  const TABS = ['overview', 'setup', 'verify', 'roles', 'proxy', 'builds', 'ranks', 'players', 'admins', 'sync', 'audit', 'diag'];
+  const PAGES = { overview, setup, verify: verifyPage, roles: rolesPage, proxy: proxyPage, builds: buildsPage, ranks: ranksPage, players, admins: adminsPage, sync: syncPage, audit, diag };
+  const NAV_GROUPS = [['nav_general', ['overview', 'setup', 'verify']], ['nav_roles', ['roles', 'proxy', 'builds', 'ranks']], ['nav_community', ['players', 'admins']], ['nav_ops', ['sync', 'audit', 'diag']]];
   const guildName = (g) => (state.guilds || []).find((x) => x.id === g)?.name || t('sw_unknown');
 
   function closeDrawer() {
@@ -130,9 +127,11 @@
   }
 
   // ---- language switching keeps unsaved work: controls are captured by position before the re-render and restored after it.
+  /** Form controls whose values survive a language switch. A role picker counts as ONE control (its value), never its search box. */
+  const CONTROLS = 'input:not(.rp-search), select, textarea, .rolepick';
   function captureState() {
     const c = document.getElementById('tab-content'); if (!c) return null;
-    const controls = [...c.querySelectorAll('input, select, textarea')].map((n) => ({ tag: n.tagName, type: n.type, v: n.type === 'checkbox' || n.type === 'radio' ? n.checked : n.value }));
+    const controls = [...c.querySelectorAll(CONTROLS)].map((n) => ({ tag: n.tagName, type: n.type, v: n.type === 'checkbox' || n.type === 'radio' ? n.checked : n.value }));
     const f = document.activeElement; const focus = c.contains(f) ? [...c.querySelectorAll('input, select, textarea, button')].indexOf(f) : -1;
     return { hash: location.hash, scroll: window.scrollY, controls, focus, open: [...c.querySelectorAll('details')].map((d) => d.open) };
   }
@@ -142,15 +141,16 @@
     // list is read again and restoring continues from the next control; the first structural mismatch stops it (never writes to the wrong control).
     let i = 0;
     for (let pass = 0; pass < 6 && i < snap.controls.length; pass++) {
-      const nodes = [...c.querySelectorAll('input, select, textarea')]; let rebuilt = false;
+      const nodes = [...c.querySelectorAll(CONTROLS)]; let rebuilt = false;
       for (; i < snap.controls.length && i < nodes.length && !rebuilt; i++) {
         const n = nodes[i], w = snap.controls[i];
         if (n.tagName !== w.tag || n.type !== w.type) { i = snap.controls.length; break; }
         const checkable = n.type === 'checkbox' || n.type === 'radio'; const have = checkable ? n.checked : n.value;
         if (have === w.v) continue;                                  // already equal (e.g. auto-saved): do not re-fire handlers
         if (checkable) n.checked = w.v; else n.value = w.v;
-        n.dispatchEvent(new Event(checkable || n.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
-        if (n.tagName === 'SELECT') rebuilt = true;                  // handlers may have replaced the controls after this one
+        const pickerLike = n.tagName === 'SELECT' || n.classList.contains('rolepick');
+        n.dispatchEvent(new Event(checkable || pickerLike ? 'change' : 'input', { bubbles: true }));
+        if (pickerLike) rebuilt = true;                  // handlers may have replaced the controls after this one
       }
       if (!rebuilt) break;
     }
@@ -166,7 +166,7 @@
     renderNav(g, tab); renderSwitcher(g, tab);
     const content = el('div', { id: 'tab-content' });
     const head = el('div', { class: 'page-head' }, el('h2', {}, icon(tab), el('span', { text: t(`tab_${tab}`) })), el('p', { text: t(`pd_${tab}`) }));
-    queueMicrotask(async () => { if (token !== renderToken) return; let n; try { n = await PAGES[tab](g, content); } catch (e) { console.error('page render failed', e); n = [failPanel(t('error_generic'), route)]; } if (token === renderToken && n) { content.replaceChildren(...n); paintIcons(content); restoreState(content, snap); } });
+    queueMicrotask(async () => { if (token !== renderToken) return; let n; try { n = await PAGES[tab](g, content); } catch (e) { console.error('page render failed', e); n = [failPanel(t('error_generic'), route)]; } if (token === renderToken && n) { content.replaceChildren(...n.filter(keep)); paintIcons(content); restoreState(content, snap); } });
     content.replaceChildren(el('div', { class: 'skeleton' }), el('div', { class: 'skeleton' }));
     return [head, content];
   }
@@ -380,7 +380,7 @@
         const noRole = r.enabled && !r.discordRoleId; const hint = tr.querySelector('.hint'); hint.textContent = noRole ? t('rk_norole') : '';
       });
       saveBtn.disabled = errs.size > 0 || ranks.length === 0;
-      summary.replaceChildren(errs.size ? el('p', { class: 'err', text: t('rk_invalid') }) : null);
+      summary.replaceChildren(...(errs.size ? [el('p', { class: 'err', text: t('rk_invalid') })] : []));
     }
     function build() {
       const list = sorted();
@@ -588,12 +588,12 @@
         el('span', { class: `dc-btn ${v.buttonStyle}` }, v.buttonEmoji ? el('span', { text: emojiNode(v.buttonEmoji) }) : null, el('span', { text: v.buttonLabel.trim() || d.buttonLabel })));
       const pub = data.published; const dest = channelSel.value || null;
       publishBtn.textContent = pub ? t('pn_update') : t('pn_publish'); repostBtn.hidden = !pub; publishBtn.disabled = busy || !data.canPublish; repostBtn.disabled = busy || !data.canPublish; saveBtn.disabled = busy; resetBtn.disabled = busy;
-      statusBox.replaceChildren(
+      statusBox.replaceChildren(...[
         pub ? badge(t('pn_published_in', { ch: chName(pub.channelId) }), 'ok') : badge(t('pn_not_published'), 'warn'),
         pub ? badge(t(pub.upToDate ? 'pn_up_to_date' : 'pn_outdated'), pub.upToDate ? 'ok' : 'warn') : null,
         dirty() ? badge(t('pn_unsaved'), 'warn') : null,
         pub ? el('a', { class: 'btn', href: pub.url, target: '_blank', rel: 'noopener noreferrer', text: t('pn_open_message') }) : null,
-        el('span', { class: 'muted hint', id: 'pn-dest', text: t('pn_dest', { ch: dest ? chName(dest) : t('pn_dest_none') }) }));
+        el('span', { class: 'muted hint', id: 'pn-dest', text: t('pn_dest', { ch: dest ? chName(dest) : t('pn_dest_none') }) })].filter(keep));
     }
     const onEdit = () => { sync(); paint(); };
     [inTitle, inDesc, inFooter, inThumb, inLabel, inEmoji, selStyle, selLang].forEach((n) => { n.addEventListener('input', onEdit); n.addEventListener('change', onEdit); });
@@ -647,6 +647,80 @@
           pf('buttonEmoji', t('pn_f_emoji'), inEmoji, t('pn_f_emoji_hint')), pf('language', t('pn_f_lang'), selLang)),
         el('div', { class: 'panel-side' }, el('h4', { text: t('pn_preview') }), prevBox, el('p', { class: 'muted hint', text: t('pn_preview_note') }), el('h4', { text: t('pn_status') }), statusBox,
           el('div', { class: 'panel-actions' }, publishBtn, repostBtn, saveBtn, resetBtn))));
+  }
+
+
+  // ---------------------------------------------------------------- country roles: proxy countries + country-wide party/unit identity roles
+  const IDENTITY_UI = [['id_parties', ['country_party_member', 'country_party_president']], ['id_units', ['country_unit_member', 'country_unit_leader', 'country_unit_owner']]];
+  async function proxyPage(g) {
+    const [px, idr, rl, st] = await Promise.all([api('GET', `/api/guilds/${g}/proxy-countries`), api('GET', `/api/guilds/${g}/identity-roles`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/settings`)]);
+    if (!px.ok) return [el('p', { class: 'err', role: 'alert', text: errText(px) })];
+    if (!px.data.enabled) return [el('div', { class: 'callout warn', role: 'note', id: 'px-unavailable' }, el('p', { text: t('px_unavailable') }))];
+    const roles = rl.ok ? rl.data.roles : []; const proxies = Array.isArray(px.data.proxies) ? px.data.proxies : [];
+    const idRoles = idr.ok ? idr.data.roles : {};
+    const taken = (except) => new Set([...proxies.map((p) => p.discordRoleId), ...Object.values(idRoles)].filter((x) => x && x !== except));
+    const fail = (r) => toast(r.data?.error === 'validation' ? t('e_validation') : errText(r), true);
+
+    // ---- add a proxy country
+    const countryPick = AON.entityPicker({ type: 'country', api, guildId: g, label: t('px_country'), allowClear: true });
+    const addRole = roleSelect(roles, '', true, taken(''), t('px_role'));
+    const addBtn = el('button', { class: 'btn primary', type: 'button', id: 'px-add', text: t('px_add') });
+    addBtn.addEventListener('click', async () => {
+      const cid = countryPick.value(); if (!cid || !addRole.value) { toast(t('px_pick_both'), true); return; }
+      addBtn.disabled = true; const r = await api('PUT', `/api/guilds/${g}/proxy-countries/${encodeURIComponent(cid)}`, { discordRoleId: addRole.value }); addBtn.disabled = false;
+      if (r.ok) { toast(t('px_added')); route(); } else fail(r);
+    });
+    // ---- configured proxies: change the role, or remove
+    const rows = proxies.map((p) => {
+      const pick = roleSelect(roles, p.discordRoleId, false, taken(p.discordRoleId), t('px_role')); const save = el('button', { class: 'btn', type: 'button', text: t('save'), hidden: true });
+      pick.addEventListener('change', () => { save.hidden = pick.value === p.discordRoleId; });
+      save.addEventListener('click', async () => { const r = await api('PUT', `/api/guilds/${g}/proxy-countries/${encodeURIComponent(p.countryId)}`, { discordRoleId: pick.value }); if (r.ok) { toast(t('px_added')); route(); } else fail(r); });
+      const del = el('button', { class: 'btn danger', type: 'button', text: t('remove'), 'aria-label': `${t('remove')}: ${p.countryName || p.countryId}` });
+      del.addEventListener('click', async () => { if (!(await confirmDialog(t('px_remove_title'), t('px_remove_text'), true))) return; const r = await api('DELETE', `/api/guilds/${g}/proxy-countries/${encodeURIComponent(p.countryId)}`); if (r.ok) { toast(t('px_removed')); route(); } else fail(r); });
+      return el('div', { class: 'proxy-row card', 'data-country': p.countryId }, el('div', { class: 'who' }, el('span', { class: 'avatar', 'aria-hidden': 'true', text: (p.countryName || p.countryId).slice(0, 1).toUpperCase() }), el('strong', {}, el('bdi', { text: p.countryName || p.countryId }))), pick, el('div', { class: 'row' }, save, del));
+    });
+    const proxyCard = el('div', { class: 'card', id: 'px-card' }, el('h3', { text: t('px_title') }), el('p', { class: 'muted', text: t('px_intro') }),
+      el('h4', { text: t('px_current') }), el('div', { class: 'proxy-list' }, rows.length ? rows : [el('p', { class: 'muted', id: 'px-none', text: t('px_none') })]),
+      el('div', { class: 'proxy-add' }, countryPick.el, el('div', { class: 'field' }, el('label', { text: t('px_role') }), addRole), addBtn));
+
+    // ---- identity roles (one role per kind)
+    const mods = st.ok ? st.data?.settings?.modules : null; const modWarn = mods && (!mods.party || !mods.unit);
+    const idPick = {}; const idSave = el('button', { class: 'btn primary', type: 'button', id: 'id-save', text: t('id_save') });
+    const idGroups = IDENTITY_UI.map(([gl, kinds]) => el('div', {}, el('h4', { text: t(gl) }), el('div', { class: 'id-grid' }, kinds.map((k) => {
+      idPick[k] = roleSelect(roles, idRoles[k] || '', true, taken(idRoles[k] || ''), t(`id_${k}`)); idPick[k].id = `id-${k}`;
+      return el('div', { class: 'field', 'data-kind': k }, el('label', { text: t(`id_${k}`) }), el('p', { class: 'muted hint', text: t(`id_${k}_d`) }), idPick[k]);
+    }))));
+    idSave.addEventListener('click', async () => {
+      const kinds = IDENTITY_UI.flatMap(([, ks]) => ks).filter((k) => (idPick[k].value || null) !== (idRoles[k] || null)); idSave.disabled = true;
+      for (const k of kinds) { const r = await api('PUT', `/api/guilds/${g}/identity-roles`, { kind: k, roleId: idPick[k].value || null }); if (!r.ok) { idSave.disabled = false; fail(r); route(); return; } }
+      idSave.disabled = false; toast(t('id_saved')); route();
+    });
+    const idCard = el('div', { class: 'card', id: 'id-card' }, el('h3', { text: t('id_title') }), el('p', { class: 'muted', text: t('id_intro') }),
+      modWarn ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('id_module_warn') })) : null, ...idGroups, el('div', { class: 'row' }, idSave));
+    return [!rl.ok ? el('div', { class: 'notice', text: t('e_discord_unavailable') }) : null, proxyCard, idCard];
+  }
+
+  // ---------------------------------------------------------------- trusted bot administrators
+  async function adminsPage(g) {
+    const [ar, rl] = await Promise.all([api('GET', `/api/guilds/${g}/admin-roles`), api('GET', `/api/guilds/${g}/roles`)]);
+    if (!ar.ok) return [el('p', { class: 'err', role: 'alert', text: errText(ar) })];
+    const d = ar.data; const roles = rl.ok ? rl.data.roles : []; const list = Array.isArray(d.roles) ? d.roles : [];
+    const hex = (n) => (n ? `#${Number(n).toString(16).padStart(6, '0')}` : '#99aab5');
+    const intro = el('div', { class: 'card', id: 'ad-info' }, el('h3', {}, icon('admins'), ' ', t('ad_title')), el('p', { class: 'muted', text: t('ad_intro') }), el('ul', {}, el('li', { text: t('ad_can') }), el('li', { text: t('ad_cannot') })),
+      el('p', {}, el('strong', { text: `${t('ad_you')}: ` }), badge(t(d.level === 'admin' ? 'ad_level_admin' : 'ad_level_trusted'), 'ok')));
+    const rows = list.map((r) => {
+      const del = d.canManage ? el('button', { class: 'btn danger', type: 'button', text: t('remove'), 'aria-label': `${t('remove')}: ${r.name || r.roleId}` }) : null;
+      if (del) del.addEventListener('click', async () => { if (!(await confirmDialog(t('ad_remove_title'), t('ad_remove_text'), true))) return; const x = await api('DELETE', `/api/guilds/${g}/admin-roles/${r.roleId}`); if (x.ok) { toast(t('ad_removed')); route(); } else toast(errText(x), true); });
+      return el('div', { class: 'proxy-row card', 'data-role-id': r.roleId }, el('div', { class: 'who' }, el('span', { class: 'role-dot', 'aria-hidden': 'true', style: `background:${hex(r.color)}` }), el('strong', {}, el('bdi', { text: r.name || t('rp_unknown') })), r.missing ? badge(t('ad_missing'), 'warn') : null), el('span', { class: 'muted', text: r.addedAt ? fmtDate(r.addedAt) : '' }), del);
+    });
+    const listCard = el('div', { class: 'card', id: 'ad-list' }, el('h3', { text: t('ad_current') }), el('div', { class: 'proxy-list' }, rows.length ? rows : [el('p', { class: 'muted', id: 'ad-none', text: t('ad_none') })]));
+    let addCard = el('div', { class: 'callout', role: 'note', id: 'ad-viewonly' }, el('p', { text: t('ad_view_only') }));
+    if (d.canManage) {
+      const pick = roleSelect(roles, '', true, new Set(list.map((r) => r.roleId)), t('ad_add')); const add = el('button', { class: 'btn primary', type: 'button', id: 'ad-add', text: t('ad_add') });
+      add.addEventListener('click', async () => { if (!pick.value) { toast(t('px_pick_both'), true); return; } add.disabled = true; const x = await api('POST', `/api/guilds/${g}/admin-roles`, { roleId: pick.value }); add.disabled = false; if (x.ok) { toast(t('ad_added')); route(); } else toast(errText(x), true); });
+      addCard = el('div', { class: 'card', id: 'ad-addcard' }, el('div', { class: 'proxy-add' }, el('div', { class: 'field' }, el('label', { text: t('ad_add') }), pick), el('span', { class: 'muted', text: t('ad_max', { n: d.max }) }), add));
+    }
+    return [!rl.ok ? el('div', { class: 'notice', text: t('e_discord_unavailable') }) : null, intro, listCard, addCard];
   }
 
   // ---------------------------------------------------------------- diagnostics

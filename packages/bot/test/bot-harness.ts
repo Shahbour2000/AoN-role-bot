@@ -28,19 +28,19 @@ export async function botSetup(opts: { guilds?: string[]; staff?: boolean } = {}
   return { ...base, game, deps };
 }
 
-export function inv(o: Partial<{ guildId: string | null; userId: string; admin: boolean; group: string; sub: string; str: Record<string, string>; user: Record<string, string>; bool: Record<string, boolean> }> = {}) {
+export function inv(o: Partial<{ guildId: string | null; userId: string; admin: boolean; roles: string[]; group: string; sub: string; str: Record<string, string>; user: Record<string, string>; bool: Record<string, boolean> }> = {}) {
   const replies: Reply[] = []; const deferred: ({ public?: boolean } | undefined)[] = [];
   const i: Invocation = {
-    guildId: o.guildId === undefined ? 'A' : o.guildId, guildName: 'Guild A', userId: o.userId ?? 'u1', canManageGuild: o.admin ?? false,
+    guildId: o.guildId === undefined ? 'A' : o.guildId, guildName: 'Guild A', userId: o.userId ?? 'u1', canManageGuild: o.admin ?? false, memberRoleIds: o.roles ?? [],
     group: o.group ?? 'link', sub: o.sub ?? (o.group ?? 'link'),
     str: (n) => o.str?.[n], user: (n) => o.user?.[n], bool: (n) => o.bool?.[n],
     defer: async (opts) => { deferred.push(opts); }, reply: async (r) => { replies.push(r); },
   };
   return { i, replies, deferred, last: () => replies[replies.length - 1]! };
 }
-export function click(customId: string, o: { userId?: string; admin?: boolean; guildId?: string | null } = {}) {
+export function click(customId: string, o: { userId?: string; admin?: boolean; roles?: string[]; guildId?: string | null } = {}) {
   const updates: Reply[] = [];
-  const b: ButtonInvocation = { guildId: o.guildId === undefined ? 'A' : o.guildId, userId: o.userId ?? 'u1', canManageGuild: o.admin ?? false, customId, update: async (r) => { updates.push(r); } };
+  const b: ButtonInvocation = { guildId: o.guildId === undefined ? 'A' : o.guildId, userId: o.userId ?? 'u1', canManageGuild: o.admin ?? false, memberRoleIds: o.roles ?? [], customId, update: async (r) => { updates.push(r); } };
   return { b, last: () => updates[updates.length - 1]! };
 }
 export const player = (id: string, username: string): Fetched<PlayerIdentity> => ({ status: 'ok', data: { id, username } });

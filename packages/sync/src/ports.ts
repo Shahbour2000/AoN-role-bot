@@ -1,5 +1,5 @@
 import type { Fetched } from '@aon/core';
-import type { CitizensIndex, GovernmentRoster, PlayerProfile } from '@aon/client';
+import type { CitizensIndex, GovernmentRoster, PartySummary, PlayerProfile, UnitSummary } from '@aon/client';
 
 /** What the sync engine needs from the game API (AonClient satisfies this). */
 export interface GameData {
@@ -8,6 +8,9 @@ export interface GameData {
   countryCitizens(countryId: string): Promise<Fetched<CitizensIndex>>;
   playerProfile(userId: string): Promise<Fetched<PlayerProfile>>;
   playerAllTimeDamage(userId: string): Promise<Fetched<number>>;
+  /** The parties registered under a country / the military units owned by a country (country identity roles). Optional: absent => those roles are never changed. */
+  countryParties?(countryId: string): Promise<Fetched<PartySummary[]>>;
+  countryUnits?(countryId: string): Promise<Fetched<UnitSummary[]>>;
 }
 
 export type MemberRoles = { status: 'ok'; roleIds: ReadonlySet<string> } | { status: 'absent' } | { status: 'error'; message: string };

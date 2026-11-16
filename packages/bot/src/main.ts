@@ -63,7 +63,7 @@ async function main() {
       botRest: createDiscordBotRest({ botToken: web.botToken, clientId: web.clientId }), game,
       runSync: (guildId, actorId) => syncGuild({ db, game, discord, log }, { guildId, kind: 'all', requestedBy: actorId }),
       onUnlinked: async (guildId, userId, roleIds) => { const ok = await discord.assignableRoles(guildId); for (const r of roleIds) if (ok.has(r)) await discord.removeRole(guildId, userId, r, 'AoN role bot: account unlinked').catch(() => undefined); },
-      panelPublisher, health, log, publicDir: fileURLToPath(new URL('../../web/public', import.meta.url)),
+      panelPublisher, health, log, imageOrigins: imageOriginsOf([cfg.apiBaseUrl, cfg.mediaBaseUrl]), publicDir: fileURLToPath(new URL('../../web/public', import.meta.url)),
     });
     await app.listen({ port: cfg.port, host: '0.0.0.0' });
     log(`dashboard + health on :${cfg.port} (${web.appBaseUrl})`);
@@ -82,3 +82,10 @@ async function main() {
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+
+/** Origins (https only) the dashboard may draw entity images from: the game API's own host and the configured media host. No new setting. */
+function imageOriginsOf(urls: (string | undefined)[]): string[] {
+  const out = new Set<string>();
+  for (const u of urls) { if (!u) continue; try { const o = new URL(u); if (o.protocol === 'https:') out.add(o.origin); } catch { /* ignored */ } }
+  return [...out];
+}

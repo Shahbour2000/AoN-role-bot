@@ -2,7 +2,7 @@ import {
   classifyBuild, computeRank, evaluateRankRules, planRoleChanges, validateLadder,
   type BuildClass, type Fetched, type RankDefinition, type RuleEvaluation,
 } from '@aon/core';
-import { citizenshipOf, rolesByPlayer, type CitizensIndex, type GovernmentRoster, type PlayerProfile } from '@aon/client';
+import { citizenshipOf, rolesByPlayer, type CitizensIndex, type GovernmentRoster, type PartySummary, type PlayerProfile, type UnitSummary } from '@aon/client';
 import { audit, recordLinkSync, type ActiveLink, type Db, type GuildConfig, type RoleKind, type RoleMapping } from '@aon/db';
 import type { DiscordGateway, GameData } from './ports.js';
 
@@ -31,7 +31,25 @@ const RAW_ROLE: Partial<Record<RoleKind, string>> = {
 };
 type ModuleKey = 'government' | 'party' | 'unit' | 'alliance';
 const moduleOf = (k: RoleKind): ModuleKey =>
-  k.startsWith('party_') ? 'party' : k.startsWith('unit_') ? 'unit' : k.startsWith('alliance_') ? 'alliance' : 'government';
+  k.startsWith('party_') || k.startsWith('country_party_') ? 'party' : k.startsWith('unit_') || k.startsWith('country_unit_') ? 'unit' : k.startsWith('alliance_') ? 'alliance' : 'government';
+const IDENTITY_PARTY: readonly string[] = ['country_party_member', 'country_party_president'];
+const IDENTITY_UNIT: readonly string[] = ['country_unit_member', 'country_unit_leader', 'country_unit_owner'];
+
+/**
+ * The parties / units that BELONG to the server's country, as proven by the country's own lists (never by the player's nationality).
+ * A unit counts only when the list says it is owned by this very country; a list with gaps (a unit without a country or an owner)
+ * can still prove membership but can no longer prove NON-membership, so it never causes a removal.
+ */
+function countryParties(parties: Fetched<PartySummary[]> | undefined) {
+  if (!parties || parties.status !== 'ok') return { ok: false as const, why: `parties_${parties?.status ?? 'missing'}` };
+  return { ok: true as const, ids: new Set(parties.data.map((p) => p.id)), leaders: new Set(parties.data.map((p) => p.leaderId).filter((x): x is string => !!x)), complete: parties.data.every((p) => !!p.leaderId) };
+}
+function countryUnits(units: Fetched<UnitSummary[]> | undefined, countryId: string) {
+  if (!units || units.status !== 'ok') return { ok: false as const, why: `units_${units?.status ?? 'missing'}` };
+  const own = units.data.filter((u) => u.countryId === countryId);                       // defensive: only units this country owns
+  return { ok: true as const, ids: new Set(own.map((u) => u.id)), owners: new Set(own.map((u) => u.ownerId).filter((x): x is string => !!x)),
+    idsComplete: units.data.every((u) => !!u.countryId), ownersComplete: own.every((u) => !!u.ownerId) };
+}
 
 
 // ---------------------------------------------------------------- Discord error handling
@@ -69,9 +87,47 @@ const whyOf = (f: ReturnType<typeof classifyDiscordError>) => (f.kind === 'unkno
 
 const unknown = (roleId: string, why: string): RuleEvaluation => ({ roleId, evidence: 'unknown', why });
 
-function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster: Fetched<GovernmentRoster> | undefined, profile: Fetched<PlayerProfile> | undefined, citizens: Fetched<CitizensIndex> | undefined): RuleEvaluation {
+function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster: Fetched<GovernmentRoster> | undefined, profile: Fetched<PlayerProfile> | undefined, citizens: Fetched<CitizensIndex> | undefined,
+  parties?: Fetched<PartySummary[]>, units?: Fetched<UnitSummary[]>): RuleEvaluation {
   const id = m.discordRoleId;
+  const q = (why: string): RuleEvaluation => ({ roleId: id, evidence: 'qualifies', why });
+  const nq = (why: string): RuleEvaluation => ({ roleId: id, evidence: 'not_qualifies', why });
   switch (m.kind) {
+    case 'proxy_citizen': {
+      // The player's CURRENT in-game nationality is a proxy country of this server. Never touches (or implies) the ordinary citizen role.
+      if (!m.gameRef) return unknown(id, 'proxy_country_missing');
+      if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
+      const c = citizenshipOf(profile.data, m.gameRef);
+      return c.state === 'member' ? q('proxy_citizenship') : c.state === 'not_member' ? nq('proxy_citizenship') : unknown(id, 'country_unknown');
+    }
+    case 'country_party_member': case 'country_party_president': {
+      if (!cfg.countryId) return unknown(id, 'country_not_configured');
+      const P = countryParties(parties); const isPres = m.kind === 'country_party_president';
+      if (isPres && P.ok && P.leaders.has(playerId)) return q('party_president');          // the country's own list names this player as a party leader: proof enough
+      if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
+      const ms = profile.data.party;
+      if (ms.state === 'unknown') return unknown(id, 'party_membership_unknown');
+      if (ms.state === 'not_member') return isPres && P.ok && !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('no_party');
+      if (!P.ok) return unknown(id, P.why);
+      if (!P.ids.has(ms.value.id)) return isPres && !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('foreign_party');       // a party of ANOTHER country never qualifies
+      return isPres ? (ms.value.role === 'leader' ? q('party_president') : nq('not_party_president')) : q('country_party_member');
+    }
+    case 'country_unit_member': case 'country_unit_leader': case 'country_unit_owner': {
+      if (!cfg.countryId) return unknown(id, 'country_not_configured');
+      const U = countryUnits(units, cfg.countryId);
+      if (m.kind === 'country_unit_owner') {
+        if (!U.ok) return unknown(id, U.why);
+        if (U.owners.has(playerId)) return q('unit_owner');
+        return U.ownersComplete && U.idsComplete ? nq('owns_no_country_unit') : unknown(id, 'unit_owners_incomplete');
+      }
+      if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
+      const ms = profile.data.unit;
+      if (ms.state === 'unknown') return unknown(id, 'unit_membership_unknown');
+      if (ms.state === 'not_member') return nq('no_unit');
+      if (!U.ok) return unknown(id, U.why);
+      if (!U.ids.has(ms.value.id)) return U.idsComplete ? nq('foreign_unit') : unknown(id, 'unit_countries_incomplete');          // a unit of ANOTHER country never qualifies, whatever the nationality
+      return m.kind === 'country_unit_member' ? q('country_unit_membership') : ms.value.role === 'commander' ? q('unit_commander') : nq('not_unit_commander');
+    }
     case 'president': case 'vice_president': case 'minister_defense': case 'minister_economy': case 'congress':
     case 'minister_foreign': case 'government_role': {
       const raw = RAW_ROLE[m.kind] ?? m.gameRef;          // minister_foreign: raw value not verified => admin supplies it via gameRef
@@ -170,20 +226,26 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   if (member.status === 'error') return { ...base, outcome: 'failed', note: `discord_${member.message}` };
 
   // Fetch only what the enabled rules need.
-  const needRoster = enabled.some((m) => moduleOf(m.kind) === 'government' && m.kind !== 'citizen' && !m.kind.startsWith('build_')) && !!cfg.countryId;   // builds need the profile only
+  const needRoster = enabled.some((m) => moduleOf(m.kind) === 'government' && m.kind !== 'citizen' && m.kind !== 'proxy_citizen' && !m.kind.startsWith('build_')) && !!cfg.countryId;   // builds need the profile only
   const needCitizens = enabled.some((m) => m.kind === 'citizen' && !m.gameRef) && !!cfg.countryId;
-  const needProfile = buildMaps.length > 0 || enabled.some((m) => ['party_member', 'party_role', 'unit_member', 'party_leader', 'unit_leader'].includes(m.kind) || (m.kind === 'citizen' && !!m.gameRef));
+  const needProfile = buildMaps.length > 0 || enabled.some((m) => ['party_member', 'party_role', 'unit_member', 'party_leader', 'unit_leader', 'proxy_citizen', ...IDENTITY_PARTY, ...IDENTITY_UNIT].includes(m.kind) || (m.kind === 'citizen' && !!m.gameRef));
+  const needParties = enabled.some((m) => IDENTITY_PARTY.includes(m.kind)) && !!cfg.countryId;
+  const needUnits = enabled.some((m) => IDENTITY_UNIT.includes(m.kind)) && !!cfg.countryId;
   const needDamage = rankRoles.length > 0;
-  const [roster, citizens, profile, damage] = await Promise.all([
+  const [roster, citizens, profile, damage, parties, units] = await Promise.all([
     needRoster ? game.governmentRoster(cfg.countryId!) : undefined,
     needCitizens ? game.countryCitizens(cfg.countryId!) : undefined,
     needProfile ? game.playerProfile(link.playerId) : undefined,
     needDamage ? game.playerAllTimeDamage(link.playerId) : undefined,
+    needParties ? (game.countryParties?.(cfg.countryId!) ?? Promise.resolve({ status: 'error' as const, message: 'not_supported' })) : undefined,
+    needUnits ? (game.countryUnits?.(cfg.countryId!) ?? Promise.resolve({ status: 'error' as const, message: 'not_supported' })) : undefined,
   ]);
   if (roster) base.lookups['roster'] = roster.status;
   if (citizens) base.lookups['citizens'] = citizens.status;
   if (profile) base.lookups['profile'] = profile.status;
   if (damage) base.lookups['damage'] = damage.status;
+  if (parties) base.lookups['parties'] = parties.status;
+  if (units) base.lookups['units'] = units.status;
   const seen: NonNullable<UserSyncResult['seen']> = {};
   if (profile?.status === 'ok') { if (profile.data.party.state === 'member' && profile.data.party.value.role) seen.partyRole = profile.data.party.value.role; if (profile.data.unit.state === 'member' && profile.data.unit.value.role) seen.unitRole = profile.data.unit.value.role; }
   if (roster?.status === 'ok' && roster.data.unknownRoles.length) seen.unknownGovernmentRoles = roster.data.unknownRoles;
@@ -191,7 +253,7 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   const statuses = Object.values(base.lookups);
   const allFailed = statuses.length > 0 && statuses.every((s) => s !== 'ok');
 
-  const evaluations: RuleEvaluation[] = enabled.filter((m) => !m.kind.startsWith('build_')).map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens));
+  const evaluations: RuleEvaluation[] = enabled.filter((m) => !m.kind.startsWith('build_')).map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens, parties, units));
   // Player build roles: ONE classification (shared service) decides; only a definite War/Eco/Hybrid changes roles. 'unclassified'
   // (data complete, no build qualifies) and 'insufficient' (missing/invalid skills, failed profile) are never destructive: nothing changes.
   if (buildMaps.length) {
