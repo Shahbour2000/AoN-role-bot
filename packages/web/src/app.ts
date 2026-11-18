@@ -4,6 +4,8 @@ import fastifyCookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched, IDENTITY_KINDS, isIdentityKind, isProxyKind } from '@aon/core';
+import { SHARED_IDENTITY_KINDS } from '@aon/core';
+import { setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles } from '@aon/db';
 import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
@@ -429,6 +431,13 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     if (p.data.kind.startsWith('alliance_')) return fail(reply, 422, 'feature_unavailable');     // no backing implementation: the game API exposes no verified alliance data
     const cfgM = await getGuildConfig(db, a.guildId);
     if (!cfgM || !isKindAllowed(cfgM.communityType, p.data.kind)) return fail(reply, 422, 'kind_not_allowed_for_type');   // the server type decides which roles exist
+    // A country server may only map parties / units that BELONG to its country (proven by the game's own lists, never by the browser).
+    if (cfgM.communityType === 'country' && p.data.gameRef && ['party_member', 'party_leader', 'unit_member', 'unit_leader'].includes(p.data.kind)) {
+      if (!cfgM.countryId) return fail(reply, 422, 'country_not_set');
+      const own = await ownEntities(p.data.kind.startsWith('party') ? 'party' : 'unit', cfgM.countryId);
+      if (own.status !== 'ok') return fail(reply, 503, `game_${own.status}`);
+      if (!own.data.some((o) => o.id === p.data.gameRef)) return fail(reply, 422, 'entity_not_in_country');
+    }
     const roles = await rolesFor(a.guildId);
     if (!roles) return fail(reply, 503, 'discord_unavailable');
     const role = roles.find((r) => r.id === p.data.discordRoleId);
@@ -489,11 +498,11 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const a = await guard(req, reply); if (!a) return;
     const cfgI = await getGuildConfig(db, a.guildId); if (!cfgI) return fail(reply, 404, 'bot_not_installed');
     const rows = (await listRoleMappings(db, a.guildId)).filter((m) => isIdentityKind(m.kind));
-    return { enabled: cfgI.communityType === 'country' && !!cfgI.countryId, countryId: cfgI.countryId, kinds: IDENTITY_KINDS, roles: Object.fromEntries(IDENTITY_KINDS.map((k) => [k, rows.find((m) => m.kind === k)?.discordRoleId ?? null])) };
+    return { enabled: cfgI.communityType === 'country' && !!cfgI.countryId, countryId: cfgI.countryId, kinds: SHARED_IDENTITY_KINDS, roles: Object.fromEntries(SHARED_IDENTITY_KINDS.map((k) => [k, rows.find((m) => m.kind === k)?.discordRoleId ?? null])) };
   });
   app.put('/api/guilds/:guildId/identity-roles', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
-    const body = z.object({ kind: z.enum(IDENTITY_KINDS), roleId: z.string().regex(SNOWFLAKE).nullable() }).strict().safeParse(req.body); if (!body.success) return fail(reply, 422, 'validation');
+    const body = z.object({ kind: z.enum(SHARED_IDENTITY_KINDS), roleId: z.string().regex(SNOWFLAKE).nullable() }).strict().safeParse(req.body); if (!body.success) return fail(reply, 422, 'validation');
     if (body.data.roleId !== null) { const ru = await usableRole(a.guildId, body.data.roleId); if (ru === 'unavailable') return fail(reply, 503, 'discord_unavailable'); if (ru === 'invalid') return fail(reply, 422, 'role_invalid'); }
     const res = await setIdentityRole(db, { guildId: a.guildId, kind: body.data.kind, discordRoleId: body.data.roleId, actor: a.session.discordUserId });
     return res.ok ? { ok: true } : mappingFail(reply, res.code);
@@ -631,7 +640,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
       if (!countryId) return fail(reply, 422, 'country_required');
       res = await cachedOptions(`parties:${countryId}`, async () => { const r = await g.countryParties(countryId); return r.status === 'ok' ? { status: 'ok', data: partyOptions(r.data) } : r; });
     } else if (countryId) {
-      res = await cachedOptions(`units:${countryId}`, async () => { const r = await g.countryUnits(countryId); return r.status === 'ok' ? { status: 'ok', data: unitOptions(r.data) } : r; });
+      res = await cachedOptions(`units:${countryId}`, async () => { const r = await g.countryUnits(countryId); return r.status === 'ok' ? { status: 'ok', data: unitOptions(r.data.filter((u) => !u.countryId || u.countryId === countryId)) } : r; });
     } else {
       // No country filter: the game API's own search (documented, shape unverified). Needs a term so we never page the whole world.
       if (norm(term).trim().length < 2) return { items: [], total: 0, offset, limit, hasMore: false, verified: false, needsQuery: true };
@@ -658,6 +667,71 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     return { id, name };
   });
 
+  // ------------------------------------------------------------------ country-server party / unit MEMBERSHIP roles (one role per party / unit)
+  // Country isolation is decided HERE from the server's own configured country. A browser-supplied country is never read by these routes.
+  /** The parties / units of the SERVER'S OWN country, as searchable options. Units must be owned by this very country (countryId equality). */
+  async function ownEntities(type: 'party' | 'unit', countryId: string): Promise<Fetched<EntityOption[]>> {
+    return cachedOptions(`own:${type}:${countryId}`, async () => {
+      if (type === 'party') { const r = await deps.game.countryParties(countryId); return r.status === 'ok' ? { status: 'ok', data: partyOptions(r.data) } : r; }
+      const r = await deps.game.countryUnits(countryId);
+      return r.status === 'ok' ? { status: 'ok', data: unitOptions(r.data.filter((u) => u.countryId === countryId)) } : r;
+    });
+  }
+  const EntityRoleType = z.enum(['party', 'unit']);
+  const memberKindOf = (type: 'party' | 'unit') => (type === 'party' ? 'country_party_member' : 'country_unit_member');
+  const ownCountryOf = async (guildId: string): Promise<string | null> => { const c = await getGuildConfig(db, guildId); return c && c.communityType === 'country' && c.countryId ? c.countryId : null; };
+
+  app.get('/api/guilds/:guildId/country-entities/:type', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    if (!entityLimit(`e:${a.session.discordUserId}`)) return fail(reply, 429, 'rate_limited');
+    const type = EntityRoleType.safeParse((req.params as { type: string }).type);
+    const q = z.object({ q: z.string().max(40).default(''), limit: z.coerce.number().int().min(1).max(50).default(20), offset: z.coerce.number().int().min(0).max(5000).default(0) }).strict().safeParse(req.query);
+    if (!type.success || !q.success) return fail(reply, 422, 'validation');
+    const country = await ownCountryOf(a.guildId); if (!country) return fail(reply, 409, 'country_not_set');
+    const res = await ownEntities(type.data, country);
+    if (res.status !== 'ok') return fail(reply, res.status === 'not_found' ? 404 : 503, `game_${res.status}`);
+    const n = norm(q.data.q).trim();
+    const hits = (n ? res.data.filter((o) => norm(o.name).includes(n)) : [...res.data]).sort((x, y) => (Number(norm(y.name).startsWith(n)) - Number(norm(x.name).startsWith(n))) || x.name.localeCompare(y.name));
+    return { items: hits.slice(q.data.offset, q.data.offset + q.data.limit), total: hits.length, offset: q.data.offset, limit: q.data.limit, hasMore: q.data.offset + q.data.limit < hits.length, verified: true };
+  });
+
+  app.get('/api/guilds/:guildId/entity-roles', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    const cfgE = await getGuildConfig(db, a.guildId); if (!cfgE) return fail(reply, 404, 'bot_not_installed');
+    const country = cfgE.communityType === 'country' && cfgE.countryId ? cfgE.countryId : null;
+    const { current, legacy } = await listEntityMemberRoles(db, a.guildId);
+    const build = async (type: 'party' | 'unit') => {
+      const rows = current.filter((r) => r.kind === memberKindOf(type));
+      const list = country ? await ownEntities(type, country) : null; const byId = new Map((list?.status === 'ok' ? list.data : []).map((o) => [o.id, o]));
+      return { status: list ? list.status : 'unavailable', items: rows.map((r) => { const o = byId.get(r.entityId); return { entityId: r.entityId, name: o?.name ?? null, imageUrl: o?.imageUrl ?? null, discordRoleId: r.discordRoleId, inCountry: list?.status === 'ok' ? !!o : null }; })
+        .sort((x, y) => (x.name ?? x.entityId).localeCompare(y.name ?? y.entityId)) };
+    };
+    return { enabled: !!country, countryId: country, parties: await build('party'), units: await build('unit'), legacy };
+  });
+  app.put('/api/guilds/:guildId/entity-roles/:type/:entityId', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const params = req.params as { type: string; entityId: string }; const type = EntityRoleType.safeParse(params.type);
+    const body = z.object({ discordRoleId: z.string().regex(SNOWFLAKE) }).strict().safeParse(req.body);
+    if (!type.success || !GAME_ID.safeParse(params.entityId).success || !body.success) return fail(reply, 422, 'validation');
+    const country = await ownCountryOf(a.guildId); if (!country) return fail(reply, 422, 'not_country_server');
+    // Country isolation, server side: the party / unit must be in THIS server's country list, whatever the browser claims.
+    const own = await ownEntities(type.data, country);
+    if (own.status !== 'ok') return fail(reply, 503, `game_${own.status}`);
+    const entity = own.data.find((o) => o.id === params.entityId);
+    if (!entity) return fail(reply, 422, 'entity_not_in_country');
+    const ru = await usableRole(a.guildId, body.data.discordRoleId); if (ru === 'unavailable') return fail(reply, 503, 'discord_unavailable'); if (ru === 'invalid') return fail(reply, 422, 'role_invalid');
+    const res = await setEntityMemberRole(db, { guildId: a.guildId, kind: memberKindOf(type.data), entityId: entity.id, discordRoleId: body.data.discordRoleId, actor: a.session.discordUserId });
+    return res.ok ? { ok: true, entityId: entity.id, name: entity.name } : mappingFail(reply, res.code);
+  });
+  app.delete('/api/guilds/:guildId/entity-roles/:type/:entityId', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const params = req.params as { type: string; entityId: string }; const type = EntityRoleType.safeParse(params.type);
+    if (!type.success || !GAME_ID.safeParse(params.entityId).success) return fail(reply, 422, 'validation');
+    // `legacy` addresses the pre-M1 general "any party / any unit" row (game_ref ''), which the bot no longer evaluates.
+    const entityId = params.entityId === 'legacy' ? '' : params.entityId;
+    return (await removeEntityMemberRole(db, { guildId: a.guildId, kind: memberKindOf(type.data), entityId, actor: a.session.discordUserId })) ? { ok: true } : fail(reply, 404, 'not_found');
+  });
+
   // ------------------------------------------------------------------ game entity pickers (verified mappers only)
   app.get('/api/guilds/:guildId/game/parties', async (req, reply) => {
     const a = await guard(req, reply); if (!a) return;
@@ -671,7 +745,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const c = await getGuildConfig(db, a.guildId);
     if (!c?.countryId) return fail(reply, 409, 'country_not_set');
     const r = await deps.game.countryUnits(c.countryId);
-    return r.status === 'ok' ? { units: r.data } : fail(reply, r.status === 'not_found' ? 404 : 503, `game_${r.status}`);
+    return r.status === 'ok' ? { units: r.data.filter((u) => u.countryId === c.countryId) } : fail(reply, r.status === 'not_found' ? 404 : 503, `game_${r.status}`);
   });
 
   // ------------------------------------------------------------------ sync + audit

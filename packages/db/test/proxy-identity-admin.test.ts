@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { addAdminRole, addRoleMapping, guildsWithAdminRoles, hasAdminRole, listAdminRoles, listRoleMappings, MAX_ADMIN_ROLES, removeAdminRole, removeProxyCountry, removeRoleMapping,
-  setIdentityRole, setProxyCountry, updateGuildSettings, ensureGuild, type Db } from '../src/index.js';
+  setIdentityRole, setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles, setProxyCountry, updateGuildSettings, ensureGuild, type Db } from '../src/index.js';
 import { freshDb } from './helpers.js';
 
 const R = (n: number) => String(100000 + n);                                   // role ids
@@ -29,17 +29,28 @@ describe('proxy countries (role_mappings kind proxy_citizen)', () => {
     expect(await setProxyCountry(db, { guildId: 'C', countryId: 'sd', discordRoleId: R(1), actor: null })).toEqual({ ok: false, code: 'NOT_COUNTRY_SERVER' });
     expect(await setProxyCountry(db, { guildId: 'ZZ', countryId: 'sd', discordRoleId: R(1), actor: null })).toEqual({ ok: false, code: 'GUILD_NOT_FOUND' });
   });
-  it('validates ids; a proxy role is dedicated: not the citizen role, not another proxy/identity role, not a military-rank role', async () => {
+  it('validates ids; a proxy role may be the SHARED citizen role, but never an identity role, a military-rank role or another country\'s citizen role', async () => {
     expect(await setProxyCountry(db, { guildId: 'A', countryId: 'bad id!', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'GAME_REF_REQUIRED' });
     expect(await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: 'abc', actor: null })).toMatchObject({ code: 'DISCORD_ROLE_INVALID' });
+    // the intentional exception: proxies and the own-country citizen role share ONE Discord role, in either order, for several proxies at once
     await addRoleMapping(db, { guildId: 'A', kind: 'citizen', discordRoleId: R(9), actor: null });
-    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(9), actor: null })).toMatchObject({ code: 'ROLE_CONFLICT' });          // proxies must not get the citizen role
-    expect(await addRoleMapping(db, { guildId: 'A', kind: 'citizen', discordRoleId: R(1), actor: null })).toEqual({ ok: true });                         // reverse direction
-    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'ROLE_CONFLICT' });
-    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(2), actor: null })).toEqual({ ok: true });
-    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'ly', discordRoleId: R(2), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });
-    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_party_member', discordRoleId: R(2), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });
-    await db.query(`INSERT INTO military_ranks (guild_id, rank_order, name, threshold, enabled, discord_role_id) VALUES ('A',1,'R',1,true,$1)`, [R(5)]).catch(() => undefined);
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(9), actor: null })).toEqual({ ok: true });
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'ly', discordRoleId: R(9), actor: null })).toEqual({ ok: true });
+    expect(await addRoleMapping(db, { guildId: 'A', kind: 'citizen', discordRoleId: R(1), actor: null })).toEqual({ ok: true });
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'ye', discordRoleId: R(1), actor: null })).toEqual({ ok: true });                     // proxy role set AFTER the citizen role
+    expect((await listRoleMappings(db, 'A')).filter((m) => m.kind === 'proxy_citizen').map((m) => [m.gameRef, m.discordRoleId]).sort()).toEqual([['ly', R(9)], ['sd', R(9)], ['ye', R(1)]]);
+    // ... and in the other direction: a citizen mapping added after proxies already use the role
+    await db.query(`DELETE FROM role_mappings WHERE guild_id='A' AND kind='citizen'`);
+    expect(await addRoleMapping(db, { guildId: 'A', kind: 'citizen', discordRoleId: R(9), actor: null })).toEqual({ ok: true });
+    // NOT shared: the citizen role of some OTHER specific country, identity roles, rank roles
+    expect(await addRoleMapping(db, { guildId: 'A', kind: 'citizen', gameRef: 'ru', discordRoleId: R(9), actor: null })).toMatchObject({ code: 'ROLE_CONFLICT' });
+    await addRoleMapping(db, { guildId: 'A', kind: 'citizen', gameRef: 'ru', discordRoleId: R(20), actor: null });
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'cn', discordRoleId: R(20), actor: null })).toMatchObject({ code: 'ROLE_CONFLICT' });
+    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_party_president', discordRoleId: R(30), actor: null })).toEqual({ ok: true });
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'cn', discordRoleId: R(30), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });
+    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_owner', discordRoleId: R(9), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });      // an identity role may not equal a proxy role
+    await db.query(`INSERT INTO military_ranks (guild_id, key, rank_order, name_en, name_ar, min_damage, discord_role_id) VALUES ('A','r1',1,'R','ر',1000,$1)`, [R(5)]);
+    expect(await setProxyCountry(db, { guildId: 'A', countryId: 'cn', discordRoleId: R(5), actor: null })).toMatchObject({ code: 'ROLE_CONFLICT' });
   });
   it('the database refuses a proxy mapping without a country and a second role for the same country', async () => {
     await expect(db.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ('A','proxy_citizen','',$1)`, [R(1)])).rejects.toThrow(/check|violat/i);
@@ -53,20 +64,22 @@ describe('proxy countries (role_mappings kind proxy_citizen)', () => {
 });
 
 describe('country identity roles', () => {
-  const KINDS = ['country_party_member', 'country_party_president', 'country_unit_member', 'country_unit_leader', 'country_unit_owner'];
+  const KINDS = ['country_party_president', 'country_unit_leader', 'country_unit_owner'];       // the SHARED roles; membership roles are per party / unit
   it('each kind has one role (replace semantics) and can be cleared; audited', async () => {
     for (const [i, k] of KINDS.entries()) expect(await setIdentityRole(db, { guildId: 'A', kind: k, discordRoleId: R(i + 1), actor: 'u' })).toEqual({ ok: true });
     expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_owner', discordRoleId: R(50), actor: 'u' })).toEqual({ ok: true });
     expect((await listRoleMappings(db, 'A')).filter((m) => m.kind === 'country_unit_owner').map((m) => m.discordRoleId)).toEqual([R(50)]);
     expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_owner', discordRoleId: null, actor: 'u' })).toEqual({ ok: true });
-    expect((await listRoleMappings(db, 'A')).filter((m) => m.kind.startsWith('country_')).length).toBe(4);
-    expect((await audits('identity_role.cleared')).length).toBe(1); expect((await audits('identity_role.set')).length).toBe(6);
+    expect((await listRoleMappings(db, 'A')).filter((m) => m.kind.startsWith('country_')).length).toBe(2);
+    expect((await audits('identity_role.cleared')).length).toBe(1); expect((await audits('identity_role.set')).length).toBe(4);
+    // membership kinds are NOT settable here any more (one role per party / unit)
+    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_party_member', discordRoleId: R(70), actor: 'u' })).toMatchObject({ code: 'INVALID_KIND' });
   });
-  it('a role is never shared between two identity kinds; only country servers may have them; unknown kinds are refused', async () => {
-    await setIdentityRole(db, { guildId: 'A', kind: 'country_party_member', discordRoleId: R(1), actor: null });
-    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_member', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });
-    expect(await setIdentityRole(db, { guildId: 'B', kind: 'country_party_member', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'KIND_NOT_ALLOWED' });      // dedicated party server
-    await ensureGuild(db, 'G', 'G'); expect(await setIdentityRole(db, { guildId: 'G', kind: 'country_party_member', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'KIND_NOT_ALLOWED' });  // general
+  it('a role is never shared between two identity roles; only country servers may have them; unknown kinds are refused', async () => {
+    await setIdentityRole(db, { guildId: 'A', kind: 'country_party_president', discordRoleId: R(1), actor: null });
+    expect(await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_leader', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'ROLE_IN_USE' });
+    expect(await setIdentityRole(db, { guildId: 'B', kind: 'country_party_president', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'KIND_NOT_ALLOWED' });      // dedicated party server
+    await ensureGuild(db, 'G', 'G'); expect(await setIdentityRole(db, { guildId: 'G', kind: 'country_party_president', discordRoleId: R(1), actor: null })).toMatchObject({ code: 'KIND_NOT_ALLOWED' });  // general
     expect(await setIdentityRole(db, { guildId: 'A', kind: 'party_member', discordRoleId: R(2), actor: null })).toMatchObject({ code: 'INVALID_KIND' });
   });
   it('they are independent of the party-server / unit-server mappings: a dedicated party server keeps its own member/leader/role mappings', async () => {
@@ -77,7 +90,7 @@ describe('country identity roles', () => {
     expect((await listRoleMappings(db, 'B')).map((m) => m.kind).sort()).toEqual(['party_leader', 'party_member', 'party_role']);
   });
   it('changing a country server to another type removes the identity and proxy mappings (confirmed), exactly like other country-only kinds', async () => {
-    await setIdentityRole(db, { guildId: 'A', kind: 'country_party_member', discordRoleId: R(1), actor: null }); await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(2), actor: null });
+    await setEntityMemberRole(db, { guildId: 'A', kind: 'country_party_member', entityId: 'p1', discordRoleId: R(1), actor: null }); await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(2), actor: null });
     await expect(updateGuildSettings(db, 'A', { community_type: 'party', party_id: 'p' }, 'u')).rejects.toMatchObject({ code: 'INCOMPATIBLE_MAPPINGS' });
     expect((await listRoleMappings(db, 'A')).length).toBe(2);
     const r = await updateGuildSettings(db, 'A', { community_type: 'party', party_id: 'p' }, 'u', new Date(), { confirmRemoveIncompatible: true });
@@ -140,5 +153,62 @@ describe('guild-level locking (needs a real PostgreSQL server to be meaningful; 
     await addRoleMapping(db, { guildId: 'A', kind: 'citizen', discordRoleId: R(1), actor: null }); const id = (await listRoleMappings(db, 'A'))[0]!.id;
     const [r1, r2] = await Promise.all([removeRoleMapping(db, { guildId: 'A', mappingId: id, actor: 'u' }), updateGuildSettings(db, 'A', { community_type: 'general' }, 'u', new Date(), { confirmRemoveIncompatible: true }).then(() => true)]);
     expect(r2).toBe(true); expect(typeof r1).toBe('boolean'); expect((await listRoleMappings(db, 'A')).length).toBe(0);
+  });
+});
+
+describe('country party / unit MEMBERSHIP roles (one role per entity)', () => {
+  const set = (kind: string, entityId: string, role: number, guildId = 'A') => setEntityMemberRole(db, { guildId, kind, entityId, discordRoleId: R(role), actor: 'u' });
+  it('one role per party and per unit; REPLACE semantics per entity; remove; audited; isolated per server', async () => {
+    expect(await set('country_party_member', 'p1', 1)).toEqual({ ok: true }); expect(await set('country_party_member', 'p2', 2)).toEqual({ ok: true });
+    expect(await set('country_unit_member', 'u1', 3)).toEqual({ ok: true }); expect(await set('country_unit_member', 'u2', 4)).toEqual({ ok: true });
+    expect(await set('country_party_member', 'p1', 5)).toEqual({ ok: true });                                           // replace the role of p1 only
+    const l = await listEntityMemberRoles(db, 'A');
+    expect(l.current.map((r) => [r.kind, r.entityId, r.discordRoleId])).toEqual([['country_party_member', 'p1', R(5)], ['country_party_member', 'p2', R(2)], ['country_unit_member', 'u1', R(3)], ['country_unit_member', 'u2', R(4)]]);
+    expect(l.legacy).toEqual([]);
+    expect(await removeEntityMemberRole(db, { guildId: 'A', kind: 'country_unit_member', entityId: 'u1', actor: 'u' })).toBe(true);
+    expect(await removeEntityMemberRole(db, { guildId: 'A', kind: 'country_unit_member', entityId: 'u1', actor: 'u' })).toBe(false);
+    expect((await audits('entity_role.set')).length).toBe(5); expect((await audits('entity_role.removed')).length).toBe(1);
+    await ensureGuild(db, 'D', 'D'); await updateGuildSettings(db, 'D', { community_type: 'country', country_id: 'sd' }, 'x');
+    expect(await set('country_party_member', 'p1', 5, 'D')).toEqual({ ok: true });                                      // the same role / party in ANOTHER server is independent
+    expect((await listEntityMemberRoles(db, 'A')).current.length).toBe(3);
+  });
+  it('refuses: a role already used by another identity / proxy role or a rank, other server types, bad ids and kinds', async () => {
+    await set('country_party_member', 'p1', 1);
+    expect(await set('country_party_member', 'p2', 1)).toMatchObject({ code: 'ROLE_IN_USE' });                         // never two parties on one role
+    expect(await set('country_unit_member', 'u1', 1)).toMatchObject({ code: 'ROLE_IN_USE' });
+    await setIdentityRole(db, { guildId: 'A', kind: 'country_unit_owner', discordRoleId: R(2), actor: null });
+    expect(await set('country_party_member', 'p2', 2)).toMatchObject({ code: 'ROLE_IN_USE' });                         // shared roles are exclusive too
+    await setProxyCountry(db, { guildId: 'A', countryId: 'sd', discordRoleId: R(3), actor: null });
+    expect(await set('country_party_member', 'p2', 3)).toMatchObject({ code: 'ROLE_IN_USE' });
+    await db.query(`INSERT INTO military_ranks (guild_id, key, rank_order, name_en, name_ar, min_damage, discord_role_id) VALUES ('A','r1',1,'R','ر',1000,$1)`, [R(6)]);
+    expect(await set('country_party_member', 'p2', 6)).toMatchObject({ code: 'ROLE_CONFLICT' });
+    expect(await set('country_party_member', 'p1', 1)).toEqual({ ok: true });                                           // re-saving the same entity with its own role is fine
+    expect(await set('country_party_member', 'bad id!', 7)).toMatchObject({ code: 'GAME_REF_REQUIRED' });
+    expect(await setEntityMemberRole(db, { guildId: 'A', kind: 'country_party_member', entityId: 'p3', discordRoleId: 'x', actor: null })).toMatchObject({ code: 'DISCORD_ROLE_INVALID' });
+    expect(await set('party_member', 'p3', 7)).toMatchObject({ code: 'INVALID_KIND' });
+    expect(await set('country_party_member', 'p3', 7, 'B')).toMatchObject({ code: 'NOT_COUNTRY_SERVER' });             // dedicated party server
+    expect(await set('country_party_member', 'p3', 7, 'ZZ')).toMatchObject({ code: 'GUILD_NOT_FOUND' });
+  });
+  it('the database itself refuses an empty entity reference for NEW rows and duplicate rows per entity', async () => {
+    await expect(db.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ('A','country_unit_member','',$1)`, [R(1)])).rejects.toThrow(/check|violat/i);
+    await set('country_unit_member', 'u1', 1);
+    await expect(db.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ('A','country_unit_member','u1',$1)`, [R(9)])).rejects.toThrow(/unique|duplicate/i);
+  });
+  it('the old general member rows are reported as legacy, never mixed with per-entity roles, and can be removed', async () => {
+    await db.query(`DELETE FROM role_mappings WHERE guild_id='A'`);
+    await db.query(`ALTER TABLE role_mappings DROP CONSTRAINT role_mappings_entity_member_ref`);                           // simulate a row written by Delivery B (before the constraint existed)
+    await db.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ('A','country_party_member','',$1)`, [R(1)]);
+    await set('country_party_member', 'p1', 2);
+    const l = await listEntityMemberRoles(db, 'A');
+    expect(l.legacy).toEqual([{ kind: 'country_party_member', discordRoleId: R(1) }]); expect(l.current.map((r) => r.entityId)).toEqual(['p1']);
+    expect(await removeEntityMemberRole(db, { guildId: 'A', kind: 'country_party_member', entityId: '', actor: 'u' })).toBe(true);
+    expect((await listEntityMemberRoles(db, 'A')).legacy).toEqual([]);
+  });
+  it('concurrency: two admins saving the SAME party leave exactly one row; different parties both persist; a racing role grab keeps roles exclusive', async () => {
+    await Promise.all([set('country_party_member', 'p1', 1), set('country_party_member', 'p1', 2), set('country_party_member', 'p1', 3)]);
+    expect((await listEntityMemberRoles(db, 'A')).current.filter((r) => r.entityId === 'p1').length).toBe(1);
+    const res = await Promise.all([set('country_party_member', 'pa', 40), set('country_unit_member', 'ua', 40), set('country_party_member', 'pb', 40)]);
+    expect(res.filter((r) => r.ok).length).toBe(1);                                                                      // exactly one entity wins the contested Discord role
+    expect(res.filter((r) => !r.ok).every((r) => !r.ok && r.code === 'ROLE_IN_USE')).toBe(true);
   });
 });

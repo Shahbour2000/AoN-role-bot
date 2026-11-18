@@ -1,6 +1,6 @@
 # AoN Role Bot — project status
 
-Updated for **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
+Updated for **M1 (role-system corrections, see the first section after the roadmap)**, on top of **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
 (no `.git` metadata in the upload, so no commit hash can be stated). Statuses: **COMPLETE** implemented and verified · **PARTIAL** implemented but
 incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evidence") · **BLOCKED** genuine external limitation · **NOT STARTED**.
 
@@ -11,14 +11,40 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | # | Requirement | Status |
 |---|---|---|
 | 1 | Verification dashboard + customizable ticket panel published from the dashboard | **COMPLETE — accepted by the owner after testing on the live Discord server (Delivery A)**. A stray "null" text seen in the owner's screenshots was fixed in Delivery B. |
-| 2 | Proxy countries | **Delivery B: implemented; tested on mock / PGlite / PG16 / jsdom. Not yet run on real Discord.** |
-| 3 | Country-wide party / military-unit identification roles | **Delivery B: implemented; same evidence level.** Depends on two unverified API facts, see "Known limitations". |
+| 2 | Proxy countries | **Delivery B + M1 (proxy roles may share the citizen role).** Tested on mock / PGlite / PG16 / jsdom. Not yet run on real Discord. |
+| 3 | Country party / military-unit roles | **M1: corrected model — one membership role per party / unit + shared Party President, Unit Leader, Unit Owner; server-side country isolation.** Same evidence level. Depends on two unverified API facts, see "Known limitations". |
 | 4 | Searchable role / party / unit / country selectors | **Delivery B: role picker (real names + colours) and image-or-initials entity pickers.** Role picker is used on the Roles, Builds, Ranks, Country-roles and Bot-administrators pages. |
 | 5 | Trusted bot administrators | **Delivery B: implemented (dashboard + slash commands); never run on real Discord.** |
 | 6 | Guild-level lock (server type vs mappings); stale-response protection in pickers | **Delivery B: both fixed.** Lock proven on real PostgreSQL 16 (red/green); stale fix has a red/green test for one of two scenarios. |
 | – | Phase 3-6 items from the older plan (nickname sync, build roles formula, alliance, …) | unchanged, see the older phase tables below |
 
-## Delivery B — this delivery
+## M1 — this delivery (role-system corrections)
+| Requirement | What exists now | Status | Evidence |
+|---|---|---|---|
+| Shared citizen role for proxy countries | exception limited to own-country `citizen` (no game ref) ⇄ `proxy_citizen`; all other duplicate-role protection kept | COMPLETE (code) | db 20 + sync 29 + web API; **PG16 and PGlite** |
+| Sync of the shared role: grant, removal, nationality change, no removal while uncertain, no churn | union rule of `planRoleChanges`; proxy→proxy change makes no Discord call | COMPLETE (code) | sync tests (mock Discord / mock game) |
+| Party membership: one role per party | `country_party_member`, `game_ref` = party id; unique per (server, party); NOT VALID check for new rows | COMPLETE (code) | db, sync, API, jsdom |
+| Party President: one shared role | `country_party_president` unchanged | COMPLETE (code) | sync |
+| Unit membership: one role per unit | `country_unit_member`, `game_ref` = unit id | COMPLETE (code) | db, sync, API, jsdom |
+| Unit Leader (commander) and Unit Owner (`ownerId`): one shared role each, independent | unchanged evaluation; tests for member+leader+owner of one unit, leader-not-owner, owner-not-leader, owner outside the unit | COMPLETE (code) | sync |
+| Dashboard selectors: only the server's country, name + logo/initials, searchable | `GET /country-entities/:type`, scoped `AON.entityPicker`; shared roles have no selector | COMPLETE (code) | API 13, jsdom 5 |
+| Strict server-side isolation | server uses its configured country; `countryId` from the browser → 422; PUT / POST re-check membership in the country list; a foreign unit inside the list is refused; game down → 503 (never saved on a guess) | COMPLETE (code) | API tests incl. smuggled unit |
+| Safe sync: incomplete data, idempotency, switching party / unit / leadership / ownership / nationality | see tests; lists fetched once per run | COMPLETE (code) | sync (25-member run, second run = 0 Discord calls) |
+| Migration 0012 on an existing database | additive; legacy rows preserved byte-for-byte (test upgrades a Delivery-B-shaped schema with legacy rows) | COMPLETE (code) | db migrate test on **PG16 and PGlite** |
+| Dedicated party / unit server configurations | unchanged; new kinds refused there | COMPLETE (code) | sync + db tests |
+| Real-PostgreSQL concurrency | same entity saved by 3 admins ⇒ 1 row; 3 writers grab one Discord role ⇒ exactly 1 wins; existing guild-lock race tests | COMPLETE | **PG16** (also pass on PGlite) |
+
+**Remaining limitations (M1)**
+1. Legacy "any party / any unit" rows are not auto-deleted and members keep the old Discord role until the admin removes it by hand (deliberate: no destructive change on deploy). Your screenshot shows them unset, so this should be a no-op in production.
+2. Removing or replacing a party / unit role stops managing the old Discord role; members keep it until removed by hand (same behaviour as proxy roles).
+3. A party / unit mapped before it left the country is flagged "no longer part of this country" and stops granting, but is not deleted automatically.
+4. The generic per-party / per-unit mappings on the Role mappings page still exist for country servers (now with the same country check); the Country roles page is the intended place for the whole-country model.
+5. Parties and countries have no image in any API sample ⇒ initials; units show `logoUrl` only if https. Nothing here was verified against the live API.
+6. **Pre-existing flaky test** (not caused by M1): `reconcile.test.ts › two simultaneous /sync all` failed in 2 of 10 runs on the untouched upload on this single-CPU sandbox (timing: the second sync sometimes starts after the first finished).
+7. Not run: real Discord, the live game API, a real browser, production.
+8. Next milestones are not started: M2 verification log channel, M3 names instead of IDs + history, M4 dashboard redesign + scrollbar, M5 remaining roadmap (nickname sync, build classification evidence).
+
+## Delivery B (previous delivery)
 | Requirement | What exists now | Status | Evidence |
 |---|---|---|---|
 | Migration 0011 | additive: kind list only grows; indexes cover only new kinds; new table `bot_admin_roles` | COMPLETE (code) | `db/test/migrate.test.ts`; `proxy-identity-admin.test.ts` (PGlite **and PG16**) |
@@ -41,7 +67,7 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 1. The party/unit **list shapes are real samples** (`leaderId`; `countryId`, `ownerId`), but the exact meaning of `/countries/{id}/units` ("units owned by that country") and the profile role words (`leader`, `commander`) come from the same samples and have not been checked live.
 2. If a unit has no `ownerId` or `countryId`, the bot can still *grant* roles but will never *remove* them (it treats that as unknown). So an incomplete API response is safe, but roles may linger until the data is complete.
 3. **Images:** only units can have one (`logoUrl`, null in the only sample). A relative path is ignored. The dashboard may load images only from the game API host and the optional media host (no new setting). Parties and countries have no image field in any sample.
-4. A proxy mapping that is removed stops being managed: members keep the Discord role until it is removed by hand.
+4. A proxy mapping that is removed stops being managed: members keep the Discord role until it is removed by hand (if that role is also the citizen role, citizens keep it as before).
 5. Trusted-role membership is cached for 15 seconds per user on the dashboard; slash commands use the interaction's own role list.
 6. Never run against real Discord, the live game API, a real browser or production.
 
@@ -134,7 +160,18 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | Multi-server isolation, server-side authorisation, CSRF | COMPLETE (sandbox) | API/auth tests incl. new routes; never pen-tested |
 | Dockerfile / deployment | UNVERIFIED | never built |
 
-## Test results of this delivery (Delivery B)
+## Test results of M1 (this delivery)
+| Suite | Backend | Result |
+|---|---|---|
+| typecheck, 6 packages | – | clean |
+| core / aon-client | pure | 103 / 68 passed |
+| db | **PG16** (changed files also on PGlite) | 135 passed |
+| sync | **PG16** (changed file also on PGlite) | 125 passed (one earlier run hit the pre-existing timing flake described in limitation 6; the rerun was green) |
+| bot | **PG16** | 107 passed |
+| web | **PG16** (new API file also on PGlite) | 272 passed (11 files) |
+Real PostgreSQL 16.15 was installed in the sandbox for these runs (migrations, locking, concurrency). Everything else is mock / jsdom. **Not run:** real Discord, the live game API, a real browser, the production host.
+
+## Test results of Delivery B (previous)
 | Suite | Backend | Result |
 |---|---|---|
 | typecheck, 6 packages | – | clean |

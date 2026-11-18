@@ -101,23 +101,23 @@ describe('Country roles page: proxy countries', () => {
 });
 
 describe('Country roles page: country-wide party and unit roles', () => {
-  const KINDS = ['country_party_member', 'country_party_president', 'country_unit_member', 'country_unit_leader', 'country_unit_owner'];
-  it('lists the five kinds with descriptions, saves only what changed, and a role taken by one kind is disabled in the others', async () => {
+  const KINDS = ['country_party_president', 'country_unit_leader', 'country_unit_owner'];          // shared roles; membership roles are per party / unit (next describe)
+  it('lists the three shared roles with descriptions, saves only what changed, and a role taken by one kind is disabled in the others', async () => {
     const { c, l } = await boot(); const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#id-card'), 'page');
-    expect(KINDS.every((k) => p.$(`#id-${k}`))).toBe(true); expect(p.$('#id-card')!.textContent).toContain('Nationality does not matter');
+    expect(KINDS.every((k) => p.$(`#id-${k}`))).toBe(true); expect(p.$('#id-card')!.textContent).toContain('Shared roles'); expect(p.$('#id-country_party_member')).toBeNull(); expect(p.$('#id-country_unit_member')).toBeNull();
     const pick = (k: string) => p.$(`#id-${k}`) as unknown as HTMLElement & { value: string };
-    down(p, roleOpt(pick('country_party_member'), '900006')); down(p, roleOpt(pick('country_unit_member'), '900007')); down(p, roleOpt(pick('country_unit_owner'), '900001'));
+    down(p, roleOpt(pick('country_party_president'), '900006')); down(p, roleOpt(pick('country_unit_leader'), '900007')); down(p, roleOpt(pick('country_unit_owner'), '900001'));
     click(p, p.$('#id-save')); await waitFor(() => toast(p).includes('Country roles saved'), 'saved');
     expect(p.calls.filter((x) => x.method === 'PUT' && x.url.endsWith('/identity-roles')).length).toBe(3);
-    expect(Object.fromEntries((await listRoleMappings(c.db, G1)).map((m) => [m.kind, m.discordRoleId]))).toEqual({ country_party_member: '900006', country_unit_member: '900007', country_unit_owner: '900001' });
-    await waitFor(() => { try { return dis(roleOpt(pick('country_party_president'), '900006')); } catch { return false; } }, 'used elsewhere (page re-rendered after the save)');                // after the reload, the role is shown as used
+    expect(Object.fromEntries((await listRoleMappings(c.db, G1)).map((m) => [m.kind, m.discordRoleId]))).toEqual({ country_party_president: '900006', country_unit_leader: '900007', country_unit_owner: '900001' });
+    await waitFor(() => { try { return dis(roleOpt(pick('country_unit_leader'), '900006')); } catch { return false; } }, 'used elsewhere (page re-rendered after the save)');                // after the reload, the role is shown as used
     click(p, p.$('#id-save')); await new Promise((r) => setTimeout(r, 200)); expect(p.calls.filter((x) => x.method === 'PUT' && x.url.endsWith('/identity-roles')).length).toBe(3);   // nothing changed -> no requests
   });
   it('clearing a role removes the mapping; a hint appears when the Parties / Military units module is switched off', async () => {
     const { c, l } = await boot(); await updateGuildSettings(c.db, G1, { modules: { government: true, party: false, unit: true, alliance: false, ranks: false } }, null);
-    const { setIdentityRole } = await import('@aon/db'); await setIdentityRole(c.db, { guildId: G1, kind: 'country_party_member', discordRoleId: '900006', actor: null });
+    const { setIdentityRole } = await import('@aon/db'); await setIdentityRole(c.db, { guildId: G1, kind: 'country_party_president', discordRoleId: '900006', actor: null });
     const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#id-card'), 'page'); expect(p.$('#id-card .callout')!.textContent).toContain('switched off');
-    const pick = p.$('#id-country_party_member') as unknown as HTMLElement; click(p, pick.querySelector('.picker-selected button')); click(p, p.$('#id-save'));
+    const pick = p.$('#id-country_party_president') as unknown as HTMLElement; click(p, pick.querySelector('.picker-selected button')); click(p, p.$('#id-save'));
     await waitFor(() => toast(p).includes('saved'), 'saved'); expect((await listRoleMappings(c.db, G1)).length).toBe(0);
   });
 });
@@ -214,5 +214,62 @@ describe('entity picker: stale responses never overwrite newer results (controll
     const av = [...win.document.querySelectorAll('li.picker-opt .avatar')]; expect(av[0]!.querySelector('img')!.getAttribute('src')).toBe('https://media.example.com/a.webp'); expect(av[0]!.textContent).toBe('AU');
     expect(av[1]!.querySelector('img')).toBeNull(); expect(av[1]!.textContent).toBe('BU'); expect(av[2]!.querySelector('img')).toBeNull();
     av[0]!.querySelector('img')!.dispatchEvent(new win.Event('error')); expect(av[0]!.querySelector('img')).toBeNull(); expect(av[0]!.textContent).toBe('AU');
+  });
+});
+
+describe('Country roles page: per-party and per-unit membership roles', () => {
+  const party = (id: string, name: string) => ({ id, name, leaderId: 'x', leaderName: null, members: 3, ruling: false });
+  const unit = (id: string, name: string, countryId: string | null) => ({ id, name, countryId, ownerId: 'o', ownerName: null, members: 3, capacity: 10, joinPolicy: null, logoUrl: null });
+  async function world() {
+    const { c, l } = await boot();
+    c.game.countryParties = (async (id?: string) => ({ status: 'ok', data: id === 'eg' ? [party('pa', 'Alpha Party'), party('pb', 'Beta Party')] : [party('pf', 'Foreign Party')] })) as never;
+    c.game.countryUnits = (async (id?: string) => ({ status: 'ok', data: id === 'eg' ? [unit('mu1', 'First Field Army', 'eg'), unit('mu2', 'Second Field Army', 'eg'), unit('muX', 'Smuggled Unit', 'sd')] : [unit('muF', 'Sudan Unit', 'sd')] })) as never;
+    return { c, l };
+  }
+  const options = async (p: Page, card: string) => { const pk = p.$(`${card} .picker`)!; pk.querySelector('input')!.dispatchEvent(new p.win.Event('focus')); return waitFor(() => { const o = [...pk.querySelectorAll('li.picker-opt')].map((x) => x.textContent!.trim()); return o.length ? o : null; }, 'options'); };
+  it('the party selector offers ONLY this country\'s parties (no country is sent by the browser); choose a party + role, see it listed by name, change it, remove it — all persisted', async () => {
+    const { c, l } = await world(); const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#em-card-party'), 'page');
+    expect(p.$('#em-none-party')).not.toBeNull();
+    const opts = await options(p, '#em-card-party'); expect(opts.map((o) => o.replace(/^\S{1,2}(?=Alpha|Beta)/, ''))).toEqual([expect.stringContaining('Alpha Party'), expect.stringContaining('Beta Party')]); expect(opts.join()).not.toContain('Foreign');
+    expect(p.calls.filter((x) => x.url.includes('/country-entities/party')).every((x) => !x.url.includes('countryId'))).toBe(true);
+    const pk = p.$('#em-card-party .picker')!; down(p, [...pk.querySelectorAll('li.picker-opt')].find((o) => o.textContent!.includes('Beta'))!); down(p, roleOpt(p.$('#em-card-party .proxy-add')!, '900001')); click(p, p.$('#em-add-party'));
+    await waitFor(() => p.$('#em-card-party .proxy-row[data-entity="pb"]'), 'row'); expect(toast(p)).toContain('Role saved');
+    expect(p.$('#em-card-party .proxy-row[data-entity="pb"]')!.textContent).toContain('Beta Party'); expect(p.$('#em-card-party')!.textContent).not.toMatch(/\bpb\b/);       // name, never the id
+    expect((await listRoleMappings(c.db, G1)).map((m) => [m.kind, m.gameRef, m.discordRoleId])).toEqual([['country_party_member', 'pb', '900001']]);
+    const row = p.$('#em-card-party .proxy-row[data-entity="pb"]')!; down(p, roleOpt(row, '900002')); click(p, [...row.querySelectorAll('button')].find((b) => b.textContent === 'Save')!);
+    for (let i = 0; i < 80 && (await listRoleMappings(c.db, G1))[0]?.discordRoleId !== '900002'; i++) await new Promise((r) => setTimeout(r, 50));
+    expect((await listRoleMappings(c.db, G1))[0]!.discordRoleId).toBe('900002');
+    click(p, p.$('#em-card-party .proxy-row[data-entity="pb"] button.danger')); const dlg = await waitFor(() => p.$('.overlay .dialog'), 'dialog'); expect((await listRoleMappings(c.db, G1)).length).toBe(1);
+    click(p, dlg.querySelector('button.danger')); await waitFor(() => p.$('#em-none-party'), 'removed'); expect((await listRoleMappings(c.db, G1)).length).toBe(0);
+  });
+  it('the unit selector offers ONLY units owned by this country (a foreign unit inside the list is hidden); the shared leader / owner roles need no unit', async () => {
+    const { c, l } = await world(); const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#em-card-unit'), 'page');
+    const opts = await options(p, '#em-card-unit'); expect(opts.join()).toContain('First Field Army'); expect(opts.join()).toContain('Second Field Army'); expect(opts.join()).not.toMatch(/Smuggled|Sudan/);
+    expect(p.$('#id-country_unit_leader')).not.toBeNull(); expect(p.$('#id-country_unit_owner')).not.toBeNull(); expect(p.$('#id-country_party_president')).not.toBeNull();
+    expect(p.$('#id-card .picker[data-type]')).toBeNull();                                                                               // the shared roles have NO party / unit selector
+    const pk = p.$('#em-card-unit .picker')!; down(p, [...pk.querySelectorAll('li.picker-opt')].find((o) => o.textContent!.includes('First'))!); down(p, roleOpt(p.$('#em-card-unit .proxy-add')!, '900005')); click(p, p.$('#em-add-unit'));
+    await waitFor(() => p.$('#em-card-unit .proxy-row[data-entity="mu1"]'), 'row'); expect((await listRoleMappings(c.db, G1))[0]).toMatchObject({ kind: 'country_unit_member', gameRef: 'mu1' });
+  });
+  it('nothing is sent without both a party / unit and a role; a role already used elsewhere is disabled in the pickers; the proxy role picker still allows the citizen role', async () => {
+    const { c, l } = await world(); const { setEntityMemberRole } = await import('@aon/db');
+    await setEntityMemberRole(c.db, { guildId: G1, kind: 'country_party_member', entityId: 'pa', discordRoleId: '900005', actor: null });
+    const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#em-card-party .proxy-row'), 'row'); const t0 = p.calls.length;
+    click(p, p.$('#em-add-party')); await waitFor(() => toast(p).includes('Choose a party or unit'), 'pick both'); expect(p.calls.length).toBe(t0);
+    expect(dis(roleOpt(p.$('#em-card-unit .proxy-add')!, '900005'))).toBe(true); expect(dis(roleOpt(p.$('#px-card .proxy-add')!, '900005'))).toBe(true);        // used by a party role: unavailable to units and proxies
+    expect(dis(roleOpt(p.$('#em-card-party .proxy-row')!, '900005'))).toBe(false);                                           // its own row may keep it
+  });
+  it('a proxy country can be given the SAME role as the citizen role from the dashboard', async () => {
+    const { c, l } = await world(); const { addRoleMapping } = await import('@aon/db'); await addRoleMapping(c.db, { guildId: G1, kind: 'citizen', discordRoleId: '900002', actor: null });
+    const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#px-card'), 'page'); expect(dis(roleOpt(p.$('#px-card .proxy-add')!, '900002'))).toBe(false);
+    const cp = p.$('#px-card .picker[data-type="country"]')!; cp.querySelector('input')!.dispatchEvent(new p.win.Event('focus')); const o = await waitFor(() => [...cp.querySelectorAll('li.picker-opt')].find((x) => x.textContent!.includes('Sudan')), 'sudan');
+    down(p, o); down(p, roleOpt(p.$('#px-card .proxy-add')!, '900002')); click(p, p.$('#px-add')); await waitFor(() => p.$('.proxy-row[data-country="sd"]'), 'row');
+    expect((await listRoleMappings(c.db, G1)).filter((m) => m.discordRoleId === '900002').map((m) => m.kind).sort()).toEqual(['citizen', 'proxy_citizen']);
+  });
+  it('a legacy general role is explained and removable; the Arabic page renders the new cards in RTL', async () => {
+    const { c, l } = await world(); await c.db.query(`ALTER TABLE role_mappings DROP CONSTRAINT role_mappings_entity_member_ref`);
+    await c.db.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ($1,'country_unit_member','','900005')`, [G1]);
+    const p = await open(c, l, `#/g/${G1}/proxy`); await waitFor(() => p.$('#em-legacy-unit'), 'legacy'); expect(p.$('#em-legacy-party')).toBeNull();
+    click(p, p.$('#em-legacy-unit button')); const dlg = await waitFor(() => p.$('.overlay .dialog'), 'dialog'); click(p, dlg.querySelector('button.danger')); await waitFor(() => !p.$('#em-legacy-unit'), 'gone'); expect((await listRoleMappings(c.db, G1)).length).toBe(0);
+    const ar = await open(c, l, `#/g/${G1}/proxy`, 'ar'); await waitFor(() => ar.$('#em-card-party'), 'ar page'); expect(ar.$('#em-card-party h3')!.textContent).toContain('رتب عضوية الأحزاب'); expect(ar.$('#em-card-unit h3')!.textContent).toContain('الوحدات العسكرية');
   });
 });

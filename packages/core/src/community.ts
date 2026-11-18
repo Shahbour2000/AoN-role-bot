@@ -17,6 +17,12 @@ export type ModuleKey = (typeof MODULE_KEYS)[number];
 
 /** Country-server identity roles: membership of ANY party / military unit that belongs to the server's country (not tied to one party or unit). */
 export const IDENTITY_KINDS = ['country_party_member', 'country_party_president', 'country_unit_member', 'country_unit_leader', 'country_unit_owner'] as const;
+/** Country-wide roles shared by EVERY party / unit of the country: one Discord role per kind (Party President, Unit Leader, Unit Owner). */
+export const SHARED_IDENTITY_KINDS = ['country_party_president', 'country_unit_leader', 'country_unit_owner'] as const;
+/** Membership roles that belong to ONE party / unit of the country each (game_ref = that party's / unit's id; one row per entity). */
+export const ENTITY_MEMBER_KINDS = ['country_party_member', 'country_unit_member'] as const;
+export const isSharedIdentityKind = (k: string): boolean => (SHARED_IDENTITY_KINDS as readonly string[]).includes(k);
+export const isEntityMemberKind = (k: string): boolean => (ENTITY_MEMBER_KINDS as readonly string[]).includes(k);
 /** A role for players whose in-game nationality is a configured proxy country (game reference = that country's id). */
 export const PROXY_KIND = 'proxy_citizen';
 export const isIdentityKind = (k: string): boolean => (IDENTITY_KINDS as readonly string[]).includes(k);

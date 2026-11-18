@@ -38,14 +38,19 @@ describe('proxy countries API', () => {
     expect((await put(z, `${P()}/proxy-countries/sd`, { discordRoleId: R.a })).statusCode).toBe(503);
     expect((await listRoleMappings(y.c.db, G1)).filter((m) => m.kind === 'proxy_citizen')).toHaveLength(0);                  // nothing is saved on a guess
   });
-  it('the role must exist in THIS server and be usable; the citizen role cannot double as a proxy role; roles are not shared between countries', async () => {
+  it('the role must exist in THIS server and be usable; a proxy role MAY be the shared citizen role; it may never be a party / unit / president / leader / owner role', async () => {
     const x = await ctx(); const base = `${P()}/proxy-countries`;
     expect((await put(x, `${base}/sd`, { discordRoleId: '999999999' })).json().error).toBe('role_invalid');                 // no such role
     expect((await put(x, `${base}/sd`, { discordRoleId: G1 })).json().error).toBe('role_invalid');                          // @everyone
     expect((await put(x, `${base}/sd`, { discordRoleId: R.d })).json().error).toBe('role_invalid');                          // integration role
     await mut(x.c, x.l, 'POST', `${P()}/mappings`, { kind: 'citizen', discordRoleId: R.b });
-    expect((await put(x, `${base}/sd`, { discordRoleId: R.b })).statusCode).toBe(409);
-    expect((await put(x, `${base}/sd`, { discordRoleId: R.a })).statusCode).toBe(200); expect((await put(x, `${base}/ly`, { discordRoleId: R.a })).json().error).toBe('role_in_use');
+    expect((await put(x, `${base}/sd`, { discordRoleId: R.b })).statusCode).toBe(200);                                   // the intentional exception: same Discord role as the citizen role
+    expect((await put(x, `${base}/ly`, { discordRoleId: R.b })).statusCode).toBe(200);                                   // several proxies share it too
+    expect((await put(x, `${base}/sd`, { discordRoleId: R.a })).statusCode).toBe(200);
+    expect((await put(x, `${P()}/identity-roles`, { kind: 'country_party_president', roleId: '900005' })).statusCode).toBe(200);
+    expect((await put(x, `${base}/ly`, { discordRoleId: '900005' })).json().error).toBe('role_in_use');                  // an identity role is never a proxy role
+    expect((await put(x, `${P()}/identity-roles`, { kind: 'country_unit_owner', roleId: R.a })).json().error).toBe('role_in_use');   // ... and an identity role is never a proxy role
+    
     x.c.bot.down = true; expect((await put(x, `${base}/ly`, { discordRoleId: R.c })).statusCode).toBe(503);
   });
   it('malformed input is rejected; unknown properties too; only country servers; another server\'s roles/data never leak', async () => {
@@ -65,15 +70,16 @@ describe('proxy countries API', () => {
 });
 
 describe('country identity roles API', () => {
-  const kinds = ['country_party_member', 'country_party_president', 'country_unit_member', 'country_unit_leader', 'country_unit_owner'];
-  it('shows the five kinds, sets/replaces/clears each role, validated against Discord', async () => {
+  const kinds = ['country_party_president', 'country_unit_leader', 'country_unit_owner'];            // the SHARED roles; membership roles are per party / unit (entity-roles API)
+  it('shows the three shared kinds, sets/replaces/clears each role, validated against Discord', async () => {
     const x = await ctx(); const j = (await get(x.c, x.l, `${P()}/identity-roles`)).json();
-    expect(j).toMatchObject({ enabled: true, countryId: 'eg', kinds }); expect(Object.values(j.roles)).toEqual([null, null, null, null, null]);
-    for (const [i, k] of kinds.entries()) expect((await put(x, `${P()}/identity-roles`, { kind: k, roleId: ['900001', '900002', '900005', '900006', '900007'][i] })).statusCode).toBe(200);
+    expect(j).toMatchObject({ enabled: true, countryId: 'eg', kinds }); expect(Object.values(j.roles)).toEqual([null, null, null]);
+    for (const [i, k] of kinds.entries()) expect((await put(x, `${P()}/identity-roles`, { kind: k, roleId: ['900001', '900006', '900007'][i] })).statusCode).toBe(200);
     expect((await get(x.c, x.l, `${P()}/identity-roles`)).json().roles.country_unit_owner).toBe('900007');
     expect((await put(x, `${P()}/identity-roles`, { kind: 'country_unit_owner', roleId: R.a })).json().error).toBe('role_in_use');           // never shared
     expect((await put(x, `${P()}/identity-roles`, { kind: 'country_unit_owner', roleId: null })).statusCode).toBe(200); expect((await get(x.c, x.l, `${P()}/identity-roles`)).json().roles.country_unit_owner).toBeNull();
-    expect((await put(x, `${P()}/identity-roles`, { kind: 'party_member', roleId: R.a })).statusCode).toBe(422);                              // only the five identity kinds
+    expect((await put(x, `${P()}/identity-roles`, { kind: 'party_member', roleId: R.a })).statusCode).toBe(422);                              // only the shared identity kinds
+    expect((await put(x, `${P()}/identity-roles`, { kind: 'country_party_member', roleId: R.b })).statusCode).toBe(422);                      // membership roles are per party: /entity-roles
     expect((await put(x, `${P()}/identity-roles`, { kind: kinds[0], roleId: G1 })).json().error).toBe('role_invalid');
     expect((await put(x, `${P()}/identity-roles`, { kind: kinds[0], roleId: '999999999' })).json().error).toBe('role_invalid');
   });

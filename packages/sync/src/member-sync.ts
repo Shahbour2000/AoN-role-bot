@@ -100,19 +100,44 @@ function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster:
       const c = citizenshipOf(profile.data, m.gameRef);
       return c.state === 'member' ? q('proxy_citizenship') : c.state === 'not_member' ? nq('proxy_citizenship') : unknown(id, 'country_unknown');
     }
-    case 'country_party_member': case 'country_party_president': {
+    case 'country_party_member': {
+      // ONE party's membership role (game reference = that party's id). Qualifies only while the player is in THAT party AND the country's own
+      // party list proves the party belongs to this server's country. Membership of any other party never qualifies.
       if (!cfg.countryId) return unknown(id, 'country_not_configured');
-      const P = countryParties(parties); const isPres = m.kind === 'country_party_president';
-      if (isPres && P.ok && P.leaders.has(playerId)) return q('party_president');          // the country's own list names this player as a party leader: proof enough
+      if (!m.gameRef) return unknown(id, 'party_not_configured');
       if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
       const ms = profile.data.party;
       if (ms.state === 'unknown') return unknown(id, 'party_membership_unknown');
-      if (ms.state === 'not_member') return isPres && P.ok && !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('no_party');
+      if (ms.state === 'not_member' || ms.value.id !== m.gameRef) return nq('not_in_this_party');
+      const P = countryParties(parties);
       if (!P.ok) return unknown(id, P.why);
-      if (!P.ids.has(ms.value.id)) return isPres && !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('foreign_party');       // a party of ANOTHER country never qualifies
-      return isPres ? (ms.value.role === 'leader' ? q('party_president') : nq('not_party_president')) : q('country_party_member');
+      return P.ids.has(m.gameRef) ? q('party_membership') : nq('party_not_in_country');
     }
-    case 'country_unit_member': case 'country_unit_leader': case 'country_unit_owner': {
+    case 'country_unit_member': {
+      if (!cfg.countryId) return unknown(id, 'country_not_configured');
+      if (!m.gameRef) return unknown(id, 'unit_not_configured');
+      if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
+      const ms = profile.data.unit;
+      if (ms.state === 'unknown') return unknown(id, 'unit_membership_unknown');
+      if (ms.state === 'not_member' || ms.value.id !== m.gameRef) return nq('not_in_this_unit');
+      const U = countryUnits(units, cfg.countryId);
+      if (!U.ok) return unknown(id, U.why);
+      if (U.ids.has(m.gameRef)) return q('unit_membership');
+      return U.idsComplete ? nq('unit_not_in_country') : unknown(id, 'unit_countries_incomplete');       // a list with gaps cannot prove NON-membership
+    }
+    case 'country_party_president': {
+      if (!cfg.countryId) return unknown(id, 'country_not_configured');
+      const P = countryParties(parties);
+      if (P.ok && P.leaders.has(playerId)) return q('party_president');          // the country's own list names this player as a party leader: proof enough
+      if (!profile || profile.status !== 'ok') return unknown(id, `profile_${profile?.status ?? 'missing'}`);
+      const ms = profile.data.party;
+      if (ms.state === 'unknown') return unknown(id, 'party_membership_unknown');
+      if (ms.state === 'not_member') return P.ok && !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('no_party');
+      if (!P.ok) return unknown(id, P.why);
+      if (!P.ids.has(ms.value.id)) return !P.complete ? unknown(id, 'party_leaders_incomplete') : nq('foreign_party');       // a party of ANOTHER country never qualifies
+      return ms.value.role === 'leader' ? q('party_president') : nq('not_party_president');
+    }
+    case 'country_unit_leader': case 'country_unit_owner': {
       if (!cfg.countryId) return unknown(id, 'country_not_configured');
       const U = countryUnits(units, cfg.countryId);
       if (m.kind === 'country_unit_owner') {
@@ -126,7 +151,7 @@ function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster:
       if (ms.state === 'not_member') return nq('no_unit');
       if (!U.ok) return unknown(id, U.why);
       if (!U.ids.has(ms.value.id)) return U.idsComplete ? nq('foreign_unit') : unknown(id, 'unit_countries_incomplete');          // a unit of ANOTHER country never qualifies, whatever the nationality
-      return m.kind === 'country_unit_member' ? q('country_unit_membership') : ms.value.role === 'commander' ? q('unit_commander') : nq('not_unit_commander');
+      return ms.value.role === 'commander' ? q('unit_commander') : nq('not_unit_commander');       // the game's unit ROLE (commander); ownership is the separate ownerId check above
     }
     case 'president': case 'vice_president': case 'minister_defense': case 'minister_economy': case 'congress':
     case 'minister_foreign': case 'government_role': {
@@ -212,7 +237,9 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
 
   // Build roles (war / eco / hybrid) are permanent: they do not depend on any module or community type.
   const buildMaps = ctx.mappings.filter((m) => m.kind.startsWith('build_'));
-  const enabled = ctx.mappings.filter((m) => !m.kind.startsWith('build_') && cfg.modules[moduleOf(m.kind)]).concat(buildMaps);
+  // Legacy general "any party / any unit" membership rows (game_ref '') belong to the pre-M1 model: they are neither evaluated nor managed.
+  const isLegacyGeneralMember = (m: RoleMapping) => (m.kind === 'country_party_member' || m.kind === 'country_unit_member') && m.gameRef === '';
+  const enabled = ctx.mappings.filter((m) => !m.kind.startsWith('build_') && !isLegacyGeneralMember(m) && cfg.modules[moduleOf(m.kind)]).concat(buildMaps);
   const rankOk = cfg.modules.ranks && validateLadder(ctx.ladder).ok;
   const activeLadder = rankOk ? ctx.ladder.filter((r) => r.enabled) : [];       // disabled ranks are completely unmanaged
   const rankRoles = activeLadder.filter((r) => r.discordRoleId);

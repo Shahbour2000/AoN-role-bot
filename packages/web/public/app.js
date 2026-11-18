@@ -651,19 +651,22 @@
 
 
   // ---------------------------------------------------------------- country roles: proxy countries + country-wide party/unit identity roles
-  const IDENTITY_UI = [['id_parties', ['country_party_member', 'country_party_president']], ['id_units', ['country_unit_member', 'country_unit_leader', 'country_unit_owner']]];
+  const IDENTITY_UI = [['id_parties', ['country_party_president']], ['id_units', ['country_unit_leader', 'country_unit_owner']]];   // shared roles only; membership roles are per party / unit
   async function proxyPage(g) {
-    const [px, idr, rl, st] = await Promise.all([api('GET', `/api/guilds/${g}/proxy-countries`), api('GET', `/api/guilds/${g}/identity-roles`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/settings`)]);
+    const [px, idr, rl, st, er] = await Promise.all([api('GET', `/api/guilds/${g}/proxy-countries`), api('GET', `/api/guilds/${g}/identity-roles`), api('GET', `/api/guilds/${g}/roles`), api('GET', `/api/guilds/${g}/settings`), api('GET', `/api/guilds/${g}/entity-roles`)]);
     if (!px.ok) return [el('p', { class: 'err', role: 'alert', text: errText(px) })];
     if (!px.data.enabled) return [el('div', { class: 'callout warn', role: 'note', id: 'px-unavailable' }, el('p', { text: t('px_unavailable') }))];
     const roles = rl.ok ? rl.data.roles : []; const proxies = Array.isArray(px.data.proxies) ? px.data.proxies : [];
     const idRoles = idr.ok ? idr.data.roles : {};
-    const taken = (except) => new Set([...proxies.map((p) => p.discordRoleId), ...Object.values(idRoles)].filter((x) => x && x !== except));
+    const entRows = er.ok ? [...(er.data.parties?.items || []), ...(er.data.units?.items || [])] : [];
+    // Proxy roles may share ONE Discord role with the ordinary citizen role (and with each other), so only identity / membership roles are blocked for them.
+    const takenIdentity = (except) => new Set([...Object.values(idRoles), ...entRows.map((r) => r.discordRoleId)].filter((x) => x && x !== except));
+    const taken = (except) => new Set([...proxies.map((p) => p.discordRoleId), ...Object.values(idRoles), ...entRows.map((r) => r.discordRoleId)].filter((x) => x && x !== except));
     const fail = (r) => toast(r.data?.error === 'validation' ? t('e_validation') : errText(r), true);
 
     // ---- add a proxy country
     const countryPick = AON.entityPicker({ type: 'country', api, guildId: g, label: t('px_country'), allowClear: true });
-    const addRole = roleSelect(roles, '', true, taken(''), t('px_role'));
+    const addRole = roleSelect(roles, '', true, takenIdentity(''), t('px_role'));
     const addBtn = el('button', { class: 'btn primary', type: 'button', id: 'px-add', text: t('px_add') });
     addBtn.addEventListener('click', async () => {
       const cid = countryPick.value(); if (!cid || !addRole.value) { toast(t('px_pick_both'), true); return; }
@@ -672,7 +675,7 @@
     });
     // ---- configured proxies: change the role, or remove
     const rows = proxies.map((p) => {
-      const pick = roleSelect(roles, p.discordRoleId, false, taken(p.discordRoleId), t('px_role')); const save = el('button', { class: 'btn', type: 'button', text: t('save'), hidden: true });
+      const pick = roleSelect(roles, p.discordRoleId, false, takenIdentity(p.discordRoleId), t('px_role')); const save = el('button', { class: 'btn', type: 'button', text: t('save'), hidden: true });
       pick.addEventListener('change', () => { save.hidden = pick.value === p.discordRoleId; });
       save.addEventListener('click', async () => { const r = await api('PUT', `/api/guilds/${g}/proxy-countries/${encodeURIComponent(p.countryId)}`, { discordRoleId: pick.value }); if (r.ok) { toast(t('px_added')); route(); } else fail(r); });
       const del = el('button', { class: 'btn danger', type: 'button', text: t('remove'), 'aria-label': `${t('remove')}: ${p.countryName || p.countryId}` });
@@ -697,7 +700,36 @@
     });
     const idCard = el('div', { class: 'card', id: 'id-card' }, el('h3', { text: t('id_title') }), el('p', { class: 'muted', text: t('id_intro') }),
       modWarn ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('id_module_warn') })) : null, ...idGroups, el('div', { class: 'row' }, idSave));
-    return [!rl.ok ? el('div', { class: 'notice', text: t('e_discord_unavailable') }) : null, proxyCard, idCard];
+    // ---- membership roles: ONE role per party / per military unit of THIS server's country
+    const entityCard = (type) => {
+      const d = er.ok ? er.data[type === 'party' ? 'parties' : 'units'] : null; const items = d && Array.isArray(d.items) ? d.items : [];
+      const pick = AON.entityPicker({ type, scoped: true, api, guildId: g, label: t(type === 'party' ? 'em_pick_party' : 'em_pick_unit'), allowClear: true });
+      const addRole = roleSelect(roles, '', true, takenIdentity(''), t('em_role')); const addBtn = el('button', { class: 'btn primary', type: 'button', id: `em-add-${type}`, text: t('em_add') });
+      addBtn.addEventListener('click', async () => {
+        const eid = pick.value(); if (!eid || !addRole.value) { toast(t('em_pick_both'), true); return; }
+        addBtn.disabled = true; const r = await api('PUT', `/api/guilds/${g}/entity-roles/${type}/${encodeURIComponent(eid)}`, { discordRoleId: addRole.value }); addBtn.disabled = false;
+        if (r.ok) { toast(t('em_saved')); route(); } else fail(r);
+      });
+      const rows = items.map((it) => {
+        const sel = roleSelect(roles, it.discordRoleId, false, takenIdentity(it.discordRoleId), t('em_role')); const save = el('button', { class: 'btn', type: 'button', text: t('save'), hidden: true });
+        sel.addEventListener('change', () => { save.hidden = sel.value === it.discordRoleId; });
+        save.addEventListener('click', async () => { const r = await api('PUT', `/api/guilds/${g}/entity-roles/${type}/${encodeURIComponent(it.entityId)}`, { discordRoleId: sel.value }); if (r.ok) { toast(t('em_saved')); route(); } else fail(r); });
+        const nm = it.name || t('em_unknown_entity');
+        const del = el('button', { class: 'btn danger', type: 'button', text: t('remove'), 'aria-label': `${t('remove')}: ${nm}` });
+        del.addEventListener('click', async () => { if (!(await confirmDialog(t('em_remove_title'), t('em_remove_text'), true))) return; const r = await api('DELETE', `/api/guilds/${g}/entity-roles/${type}/${encodeURIComponent(it.entityId)}`); if (r.ok) { toast(t('em_removed')); route(); } else fail(r); });
+        const av = el('span', { class: 'avatar', 'aria-hidden': 'true', text: nm.slice(0, 1).toUpperCase() });
+        if (typeof it.imageUrl === 'string' && /^https:\/\//.test(it.imageUrl)) { const img = el('img', { class: 'avatar-img', src: it.imageUrl, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }); img.addEventListener('error', () => img.remove()); av.append(img); }
+        return el('div', { class: 'proxy-row card', 'data-entity': it.entityId }, el('div', { class: 'who' }, av, el('strong', {}, el('bdi', { text: nm })), it.inCountry === false ? badge(t('em_not_in_country'), 'warn') : null), sel, el('div', { class: 'row' }, save, del));
+      });
+      const legacy = er.ok ? (er.data.legacy || []).filter((l) => l.kind === (type === 'party' ? 'country_party_member' : 'country_unit_member')) : [];
+      const legacyBox = legacy.length ? el('div', { class: 'callout warn', role: 'note', id: `em-legacy-${type}` }, el('p', { text: t('em_legacy') }),
+        el('button', { class: 'btn danger', type: 'button', text: t('em_legacy_remove'), onclick: async () => { if (!(await confirmDialog(t('em_remove_title'), t('em_legacy_text'), true))) return; const r = await api('DELETE', `/api/guilds/${g}/entity-roles/${type}/legacy`); if (r.ok) { toast(t('em_removed')); route(); } else fail(r); } })) : null;
+      const down = d && d.status && d.status !== 'ok' && d.status !== 'unavailable' ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('em_list_down') })) : null;
+      return el('div', { class: 'card', id: `em-card-${type}` }, el('h3', { text: t(type === 'party' ? 'em_party_title' : 'em_unit_title') }), el('p', { class: 'muted', text: t(type === 'party' ? 'em_party_intro' : 'em_unit_intro') }),
+        legacyBox, down, el('div', { class: 'proxy-list' }, rows.length ? rows : [el('p', { class: 'muted', id: `em-none-${type}`, text: t('em_none') })]),
+        el('div', { class: 'proxy-add' }, pick.el, el('div', { class: 'field' }, el('label', { text: t('em_role') }), addRole), addBtn));
+    };
+    return [!rl.ok ? el('div', { class: 'notice', text: t('e_discord_unavailable') }) : null, proxyCard, entityCard('party'), entityCard('unit'), idCard];
   }
 
   // ---------------------------------------------------------------- trusted bot administrators

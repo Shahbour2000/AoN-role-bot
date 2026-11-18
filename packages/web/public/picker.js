@@ -19,7 +19,7 @@
   };
 
   /**
-   * opts: { type: 'country'|'party'|'unit', api, guildId, label, value, getCountryId?: () => string|null, allowClear?: boolean, hint?: string }
+   * opts: { type: 'country'|'party'|'unit', api, guildId, label, value, scoped?: boolean, getCountryId?: () => string|null, allowClear?: boolean, hint?: string }
    * returns { el, value(), refresh(), setValue(id, name?) }
    */
   function entityPicker(opts) {
@@ -76,9 +76,10 @@
     async function load(reset) {
       const mySeq = ++st.seq; st.loading = true; st.error = null; if (reset) { st.offset = 0; st.items = []; st.active = -1; } describe(); drawList();
       const qs = new URLSearchParams({ q: st.q, limit: String(PAGE), offset: String(reset ? 0 : st.items.length) });
-      const cid = opts.getCountryId ? opts.getCountryId() : null; if (cid) qs.set('countryId', cid);
-      if (opts.type === 'party' && !cid) { st.loading = false; st.error = 'country_required'; describe(); drawList(); return; }
-      const res = await opts.api('GET', `/api/guilds/${opts.guildId}/entities/${opts.type}?${qs}`);
+      // `scoped`: the server lists ONLY the parties / units of this server's own country (no country is sent or accepted from the browser).
+      const cid = !opts.scoped && opts.getCountryId ? opts.getCountryId() : null; if (cid) qs.set('countryId', cid);
+      if (opts.type === 'party' && !cid && !opts.scoped) { st.loading = false; st.error = 'country_required'; describe(); drawList(); return; }
+      const res = await opts.api('GET', `/api/guilds/${opts.guildId}/${opts.scoped ? 'country-entities' : 'entities'}/${opts.type}?${qs}`);
       if (mySeq !== st.seq) return;                                   // a newer search superseded this one
       st.loading = false; st.loaded = true;
       if (!res.ok) {
@@ -99,6 +100,7 @@
       if (st.value && !st.name) resolveName(st.value);
     }
     async function resolveName(v) {
+      if (opts.scoped) return;                                          // the scoped list already carries the name; there is no per-id lookup
       const res = await opts.api('GET', `/api/guilds/${opts.guildId}/entities/${opts.type}/${encodeURIComponent(v)}`);
       if (res.ok && st.value === v && res.data.name) { st.name = res.data.name; drawChip(); }
     }
