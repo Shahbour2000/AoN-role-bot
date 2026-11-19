@@ -21,6 +21,12 @@ export const IDENTITY_KINDS = ['country_party_member', 'country_party_president'
 export const SHARED_IDENTITY_KINDS = ['country_party_president', 'country_unit_leader', 'country_unit_owner'] as const;
 /** Membership roles that belong to ONE party / unit of the country each (game_ref = that party's / unit's id; one row per entity). */
 export const ENTITY_MEMBER_KINDS = ['country_party_member', 'country_unit_member'] as const;
+/**
+ * MEMBERSHIP FAMILIES: the kinds that mean "belongs to ONE party / ONE unit". A player belongs to at most one party and one unit, so at most
+ * one configured role of a family may qualify at a time (sync enforces it; mapping writers refuse a second role for the same entity).
+ */
+export const MEMBERSHIP_FAMILIES = { party: ['party_member', 'country_party_member'], unit: ['unit_member', 'country_unit_member'] } as const;
+export const membershipFamilyOf = (kind: string): 'party' | 'unit' | null => ((MEMBERSHIP_FAMILIES.party as readonly string[]).includes(kind) ? 'party' : (MEMBERSHIP_FAMILIES.unit as readonly string[]).includes(kind) ? 'unit' : null);
 export const isSharedIdentityKind = (k: string): boolean => (SHARED_IDENTITY_KINDS as readonly string[]).includes(k);
 export const isEntityMemberKind = (k: string): boolean => (ENTITY_MEMBER_KINDS as readonly string[]).includes(k);
 /** A role for players whose in-game nationality is a configured proxy country (game reference = that country's id). */

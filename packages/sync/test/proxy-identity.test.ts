@@ -241,10 +241,12 @@ describe('separation from the specialised party-server / unit-server systems', (
     expect(await setEntityMemberRole(h.db, { guildId: 'A', kind: 'country_unit_member', entityId: 'mu9', discordRoleId: R.uA, actor: null })).toMatchObject({ ok: false, code: 'NOT_COUNTRY_SERVER' });
     expect(await addRoleMapping(h.db, { guildId: 'A', kind: 'unit_member', discordRoleId: ROLE.party, actor: null })).toEqual({ ok: true });
   });
-  it('a country server keeps working per-party mappings of the generic kind alongside the new roles', async () => {
+  it('a country server keeps working per-party mappings of the generic kind alongside the new roles, for a DIFFERENT party (one membership role per party)', async () => {
     const h = await world(); await setEntityMemberRole(h.db, { guildId: 'A', kind: 'country_party_member', entityId: 'pt_1', discordRoleId: R.pA, actor: null });
-    expect((await addRoleMapping(h.db, { guildId: 'A', kind: 'party_member', gameRef: 'pt_1', discordRoleId: ROLE.party, actor: null })).ok).toBe(true);
-    h.game.parties = { status: 'ok', data: [party('pt_1', 'z')] }; await link(h.db, 'A', 'd1', 'm1'); h.discord.give('A', 'd1'); h.game.profiles.set('m1', profileOf('m1', { party: { id: 'pt_1', name: 'P', role: 'member' } }));
-    await run(h); expect(roles(h)).toEqual([ROLE.party, R.pA].sort());
+    expect(await addRoleMapping(h.db, { guildId: 'A', kind: 'party_member', gameRef: 'pt_1', discordRoleId: ROLE.party, actor: null })).toMatchObject({ ok: false, code: 'ROLE_ENTITY_DUPLICATE' });   // M1.1: not twice for one party
+    expect((await addRoleMapping(h.db, { guildId: 'A', kind: 'party_member', gameRef: 'pt_2', discordRoleId: ROLE.party, actor: null })).ok).toBe(true);
+    h.game.parties = { status: 'ok', data: [party('pt_1', 'z'), party('pt_2', 'z')] }; await link(h.db, 'A', 'd1', 'm1'); h.discord.give('A', 'd1'); h.game.profiles.set('m1', profileOf('m1', { party: { id: 'pt_1', name: 'P', role: 'member' } }));
+    await run(h); expect(roles(h)).toEqual([R.pA]);
+    h.game.profiles.set('m1', profileOf('m1', { party: { id: 'pt_2', name: 'P', role: 'member' } })); await run(h); expect(roles(h)).toEqual([ROLE.party]);          // moving to the generically mapped party swaps the roles
   });
 });

@@ -1,11 +1,13 @@
 # AoN Role Bot — project status
 
-Updated for **M1 (role-system corrections, see the first section after the roadmap)**, on top of **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
+Updated for **M1.1 (strict one-party / one-unit membership + API data probe, section "M1.1 — this delivery")**, on top of **M1 (role-system corrections)**, on top of **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
 (no `.git` metadata in the upload, so no commit hash can be stated). Statuses: **COMPLETE** implemented and verified · **PARTIAL** implemented but
 incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evidence") · **BLOCKED** genuine external limitation · **NOT STARTED**.
 
 **Evidence levels used below:** *mock* = fakes for Discord / game API · *PGlite* = in-process PostgreSQL · *PG16* = real PostgreSQL 16 server ·
 *jsdom* = simulated browser. **Nothing has been verified against real Discord, the live game API, a real browser, or the production host.**
+
+> **ROADMAP v3 (approved):** three requirements were added after M1 (strict one-party / one-unit membership, optional Unverified-role removal, skill-point War / Eco / Hybrid). M1.1 (requirement 1) and the read-only probe M5a are now implemented; M2a, M2b, M3, M4, M5b, M5c are not. The complete updated roadmap, design, test plan, acceptance criteria and open questions are in **`docs/ROADMAP.md`**. New order: M1.1 → M2a → M2b → M3 → M4 → M5a → M5b → M5c. The skill-based classification (M5b) is **BLOCKED on data**: the API reference and the real profile samples contain no skill information.
 
 ## Roadmap requested by the owner (priority order) — where each item stands
 | # | Requirement | Status |
@@ -18,7 +20,29 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | 6 | Guild-level lock (server type vs mappings); stale-response protection in pickers | **Delivery B: both fixed.** Lock proven on real PostgreSQL 16 (red/green); stale fix has a red/green test for one of two scenarios. |
 | – | Phase 3-6 items from the older plan (nickname sync, build roles formula, alliance, …) | unchanged, see the older phase tables below |
 
-## M1 — this delivery (role-system corrections)
+## M1.1 — this delivery (strict one-party / one-unit membership + read-only API data probe)
+| Requirement (docs/ROADMAP.md §3, §5.3) | What exists now | Status | Evidence |
+|---|---|---|---|
+| A player holds at most ONE party membership role and ONE unit membership role | sync: if more than one DIFFERENT role of a membership family would qualify (legacy / ambiguous data) none is granted, nothing is removed, `membership_conflict` is reported; writers refuse a second membership role for one entity (`ROLE_ENTITY_DUPLICATE`, HTTP 409) across the generic (`party_member` / `unit_member`) and country (`country_*_member`) kinds | COMPLETE (code) | sync, db, API tests on PG16 |
+| Move party / unit → old role removed, new granted; leave → all removed; never on unknown data | exhaustive matrices: 6 profile states × 8 starting role subsets × 3 list states for parties and for units (144 combinations each) compared with an independent oracle; swap = exactly 1 remove + 1 add, next run 0 Discord calls | COMPLETE (code) | sync (mock Discord / mock game) |
+| Shared Party President / Unit Leader / Unit Owner independent of membership | tests: president survives a party switch and goes only with leadership; owner outside a unit; commander keeps Leader across a unit switch | COMPLETE (code) | sync |
+| Membership changing while a sync runs | when a membership role change is about to be written the profile is re-read ONCE (no extra request otherwise); if the membership differs the plan is recomputed; a failed re-read keeps the first read and reports `profile_recheck` | COMPLETE (code) | sync; overlapping syncs of one member on **real PG16** converge and never hold two party roles |
+| Malformed / incomplete / conflicting data | profile error / rate-limited / malformed `party` / `militaryUnit` and list error / incomplete: nothing removed (matrices) | COMPLETE (code) | sync |
+| Dedicated party / unit servers | mappings without a game reference are outside the new rules (two roles for the dedicated party still both granted) | COMPLETE (code) | sync |
+| Concurrency of mapping writers | generic and country writers racing for one party leave exactly one distinct role (guild lock) | COMPLETE | db tests on **PG16** (and PGlite) |
+| M5a: read-only API data probe (new) | Diagnostics page button -> `GET /api/guilds/:g/diagnostics/api-shape`: for the administrator's OWN linked account (player id from the global link, never from the browser) it calls the documented `/players/{id}` and `/players/{id}/stats` and returns only key paths and types plus skill-related numbers (`@aon/core` `describeShape`); strings are never copied; audited; AR/EN | COMPLETE (code), **not run against the live game** | core 4, API 2, jsdom 1 |
+
+**What to do with the probe (blocks M5b):** after deploying, open *Diagnostics -> Inspect my linked account*, press *Copy result (JSON)* and send it to me. It contains no name, id or text value. It will show whether the game exposes skills (and in which fields). M5b (skill-point War / Eco / Hybrid) cannot be finished without it.
+
+**Decisions taken (defaults you approved):** profile decides which entity the player is in, the country's party / unit list only proves the entity belongs to the country; no extra database index (guild-lock application check instead, no migration in this delivery); the probe ships inside M1.1; no migration.
+
+**Limitations (M1.1)**
+1. Membership changes are noticed only by periodic / manual / single-user syncs (the documented `/history` feed has no party / unit join or leave events).
+2. If a legacy configuration gives one party two different roles the bot grants neither and reports `membership_conflict`; the dashboard does not show that report yet (visible in sync results / audit); new duplicates are refused at save time.
+3. Not run: real Discord, the live game API (so the probe's real output is unknown), a real browser, production.
+4. A flaky test was fixed: `reconcile.test.ts › two simultaneous /sync all` now holds the first run open (`delayMs`) instead of racing; it failed intermittently before M1.1 on the untouched code.
+
+## M1 (previous delivery, role-system corrections)
 | Requirement | What exists now | Status | Evidence |
 |---|---|---|---|
 | Shared citizen role for proxy countries | exception limited to own-country `citizen` (no game ref) ⇄ `proxy_citizen`; all other duplicate-role protection kept | COMPLETE (code) | db 20 + sync 29 + web API; **PG16 and PGlite** |
@@ -138,7 +162,7 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | Trusted bot-administrator roles (bot + dashboard) | see Delivery B | implemented in Delivery B |
 | Nickname synchronisation | NOT STARTED | needs Manage Nicknames + hierarchy rules |
 | Role reconciliation, manual (`/sync`) and scheduled sync, history | UNVERIFIED | durable scheduler + tests (mock/PGlite/PG16); never run on real Discord |
-| War / Economy / Hybrid build roles | PARTIAL / BLOCKED | code + migration 0007 exist; the real profile sample has no `skills`, formula provisional |
+| War / Economy / Hybrid build roles | PARTIAL / BLOCKED | code + migration 0007 exist with the OLD level-progress formula; superseded by the skill-point 70 % rule (roadmap M5a/M5b). The real profile sample has no `skills` and the API reference never mentions skills |
 | Military rank roles | UNVERIFIED | strong tests, never on real Discord |
 | Government office roles | UNVERIFIED | foreign-minister raw value unknown |
 | Party-specific roles (leader, member, Treasurer, Council) | PARTIAL | Treasurer/Council need the game's role value (admin enters it) |
@@ -160,7 +184,18 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | Multi-server isolation, server-side authorisation, CSRF | COMPLETE (sandbox) | API/auth tests incl. new routes; never pen-tested |
 | Dockerfile / deployment | UNVERIFIED | never built |
 
-## Test results of M1 (this delivery)
+## Test results of M1.1 (this delivery)
+| Suite | Backend | Result |
+|---|---|---|
+| typecheck, 6 packages | – | clean |
+| core / aon-client | pure | 107 / 68 passed |
+| db | **PG16** (changed file also PGlite) | 138 passed |
+| sync | **PG16** (new file also PGlite; the real-server overlap test is PG-only) | 137 passed |
+| bot | **PG16** | 107 passed |
+| web | **PG16** (new API file also PGlite) | 276 passed (11 files) |
+Real PostgreSQL 16.15 for migrations / locking / concurrency; everything else is mock / jsdom. **Not run:** real Discord, the live game API, a real browser, production.
+
+## Test results of M1 (previous)
 | Suite | Backend | Result |
 |---|---|---|
 | typecheck, 6 packages | – | clean |

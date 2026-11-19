@@ -1,5 +1,5 @@
 import {
-  classifyBuild, computeRank, evaluateRankRules, planRoleChanges, validateLadder,
+  classifyBuild, computeRank, evaluateRankRules, membershipFamilyOf, planRoleChanges, validateLadder,
   type BuildClass, type Fetched, type RankDefinition, type RuleEvaluation,
 } from '@aon/core';
 import { citizenshipOf, rolesByPlayer, type CitizensIndex, type GovernmentRoster, type PartySummary, type PlayerProfile, type UnitSummary } from '@aon/client';
@@ -24,6 +24,10 @@ export interface UserSyncResult {
   /** The member's skill-based build as classified in this pass (undefined when no build role is configured or no profile was available). */
   build?: BuildClass;
   note?: string;
+  /** Diagnostics: e.g. `membership_conflict:party` (two different roles of one membership family qualified; none was granted, nothing removed). */
+  notes?: string[];
+  /** True when the profile was re-read before writing and the membership had changed, so the plan was recomputed from the fresh data. */
+  rechecked?: boolean;
 }
 
 const RAW_ROLE: Partial<Record<RoleKind, string>> = {
@@ -86,6 +90,30 @@ async function runRoleOp(ctx: SyncContext, op: () => Promise<void>): Promise<{ o
 const whyOf = (f: ReturnType<typeof classifyDiscordError>) => (f.kind === 'unknown' ? `discord_error:${f.message}` : `discord_${f.kind}`);
 
 const unknown = (roleId: string, why: string): RuleEvaluation => ({ roleId, evidence: 'unknown', why });
+
+/** What the player's profile says about party and unit membership, as a comparable string. */
+function membershipSignature(p: Fetched<PlayerProfile>): string {
+  if (p.status !== 'ok') return p.status;
+  const f = (m: { state: string; value?: { id: string } }) => (m.state === 'member' ? `m:${m.value?.id}` : m.state);
+  return `${f(p.data.party as never)}|${f(p.data.unit as never)}`;
+}
+
+/**
+ * STRICT ONE-PARTY / ONE-UNIT ROLE. A player belongs to at most one party and one unit, so at most one configured membership role of each family
+ * may qualify. If several DIFFERENT Discord roles of one family qualify at once (two roles configured for one entity, legacy data) the bot cannot know
+ * which one is meant: it grants none of them and removes nothing (their evidence becomes "unknown"), and reports `membership_conflict`.
+ * Roles of entities the player is NOT in stay "not qualifies" and are removed as usual. Mappings without a game reference (dedicated party / unit
+ * servers) are not part of this check.
+ */
+function enforceOneMembershipRole(maps: readonly RoleMapping[], evaluations: RuleEvaluation[], base: UserSyncResult): void {
+  for (const family of ['party', 'unit'] as const) {
+    const idx = maps.map((m, i) => (m.gameRef && membershipFamilyOf(m.kind) === family ? i : -1)).filter((i) => i >= 0);
+    const qualifying = new Set(idx.filter((i) => evaluations[i]!.evidence === 'qualifies').map((i) => evaluations[i]!.roleId));
+    if (qualifying.size <= 1) continue;
+    for (const i of idx) if (evaluations[i]!.evidence === 'qualifies') evaluations[i] = { roleId: evaluations[i]!.roleId, evidence: 'unknown', why: 'membership_conflict' };
+    (base.notes ??= []).push(`membership_conflict:${family}`);
+  }
+}
 
 function evalMapping(m: RoleMapping, cfg: GuildConfig, playerId: string, roster: Fetched<GovernmentRoster> | undefined, profile: Fetched<PlayerProfile> | undefined, citizens: Fetched<CitizensIndex> | undefined,
   parties?: Fetched<PartySummary[]>, units?: Fetched<UnitSummary[]>): RuleEvaluation {
@@ -259,7 +287,7 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   const needParties = enabled.some((m) => IDENTITY_PARTY.includes(m.kind)) && !!cfg.countryId;
   const needUnits = enabled.some((m) => IDENTITY_UNIT.includes(m.kind)) && !!cfg.countryId;
   const needDamage = rankRoles.length > 0;
-  const [roster, citizens, profile, damage, parties, units] = await Promise.all([
+  let [roster, citizens, profile, damage, parties, units] = await Promise.all([
     needRoster ? game.governmentRoster(cfg.countryId!) : undefined,
     needCitizens ? game.countryCitizens(cfg.countryId!) : undefined,
     needProfile ? game.playerProfile(link.playerId) : undefined,
@@ -280,7 +308,13 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   const statuses = Object.values(base.lookups);
   const allFailed = statuses.length > 0 && statuses.every((s) => s !== 'ok');
 
-  const evaluations: RuleEvaluation[] = enabled.filter((m) => !m.kind.startsWith('build_')).map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens, parties, units));
+  const evalMaps = enabled.filter((m) => !m.kind.startsWith('build_'));
+  let belowSince: Date | null = link.rankBelowSince;
+  const assignable = await discord.assignableRoles(cfg.guildId);
+  /** Everything that turns the CURRENT lookups into a plan. Re-runnable (the profile is re-read once when a membership change is about to be written). */
+  const computePlan = () => {
+  const evaluations: RuleEvaluation[] = evalMaps.map((m) => evalMapping(m, cfg, link.playerId, roster, profile, citizens, parties, units));
+  enforceOneMembershipRole(evalMaps, evaluations, base);
   // Player build roles: ONE classification (shared service) decides; only a definite War/Eco/Hybrid changes roles. 'unclassified'
   // (data complete, no build qualifies) and 'insufficient' (missing/invalid skills, failed profile) are never destructive: nothing changes.
   if (buildMaps.length) {
@@ -295,7 +329,7 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
   }
   // Rank roles that were deleted from the ladder: a configuration fact (no game data needed) ⇒ strip them from the member.
   for (const r of retired) evaluations.push({ roleId: r, evidence: 'not_qualifies', why: 'rank_retired' });
-  let belowSince: Date | null = link.rankBelowSince;
+  belowSince = link.rankBelowSince;
   if (damage && rankRoles.length) {
     const currentOrder = rankRoles.filter((r) => member.roleIds.has(r.discordRoleId!)).reduce<number | null>((hi, r) => (hi === null || r.order > hi ? r.order : hi), null);
     const computed = damage.status === 'ok' ? computeRank(damage.data, activeLadder) : null;
@@ -304,7 +338,17 @@ async function syncMemberUnlocked(ctx: SyncContext, link: ActiveLink): Promise<U
     evaluations.push(...evaluateRankRules({ ladder: activeLadder, damage, currentOrder, policy: cfg.demotion, belowSince, now: ctx.now() }));
   }
 
-  const plan = planRoleChanges({ evaluations, managedRoleIds: managed, currentRoleIds: member.roleIds, assignableRoleIds: await discord.assignableRoles(cfg.guildId) });
+  return planRoleChanges({ evaluations, managedRoleIds: managed, currentRoleIds: member.roleIds, assignableRoleIds: assignable });
+  };
+  let plan = computePlan();
+  // A membership change is about to be WRITTEN: the profile was read some time ago and the player may have switched party / unit meanwhile. Read it once
+  // more (only in this case, so a run without a membership change costs nothing extra) and, if the membership differs, plan again from the fresh data.
+  // A failed re-read changes nothing: the first (successful) read stands and the next run converges.
+  const membershipRoleIds = new Set(evalMaps.filter((m) => membershipFamilyOf(m.kind) !== null).map((m) => m.discordRoleId));
+  if (profile?.status === 'ok' && [...plan.add, ...plan.remove].some((r) => membershipRoleIds.has(r))) {
+    const again = await game.playerProfile(link.playerId); base.lookups['profile_recheck'] = again.status;
+    if (again.status === 'ok' && membershipSignature(again) !== membershipSignature(profile)) { profile = again; base.lookups['profile'] = again.status; plan = computePlan(); base.rechecked = true; }
+  }
   const held = new Set(member.roleIds);
   base.blocked.push(...plan.blocked); base.skipped.push(...plan.skipped);
 

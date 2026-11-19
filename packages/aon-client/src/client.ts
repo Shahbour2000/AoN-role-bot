@@ -90,6 +90,13 @@ export class AonClient {
     return extractPlayerProfile(await this.http.get(`/players/by-name/${encodeURIComponent(name)}`));
   }
 
+  /** The raw JSON of the two documented player endpoints, for the read-only API data probe (shape discovery). Nothing is mapped or interpreted here. */
+  async playerRaw(userId: string): Promise<{ profile: Fetched<unknown>; stats: Fetched<unknown> }> {
+    if (!ID.test(userId)) return { profile: bad('userId'), stats: bad('userId') };
+    const [profile, stats] = await Promise.all([this.http.get(`/players/${userId}`), this.http.get(`/players/${userId}/stats`)]);
+    return { profile, stats };
+  }
+
   async playerProfile(userId: string): Promise<Fetched<PlayerProfile>> {
     if (!ID.test(userId)) return bad('userId');
     return extractPlayerProfile(await this.http.get(`/players/${userId}`));

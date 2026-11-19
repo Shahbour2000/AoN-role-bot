@@ -761,7 +761,28 @@
     if (!r.ok) return [el('p', { class: 'err', text: errText(r) })];
     const st = (v) => (v === null || v === undefined ? badge(t('dg_unknown')) : v ? badge(t('dg_ok'), 'ok') : badge(t('dg_down'), 'bad'));
     return [el('div', { class: 'card kv' }, el('span', { text: t('dg_db') }), st(r.data.database), el('span', { text: t('dg_discord') }), st(r.data.discord), el('span', { text: t('dg_api') }),
-      r.data.gameApi ? el('span', { text: Object.entries(r.data.gameApi).map(([k, v]) => `${k}: ${v ?? '—'}`).join(' · ') }) : badge(t('dg_unknown')))];
+      r.data.gameApi ? el('span', { text: Object.entries(r.data.gameApi).map(([k, v]) => `${k}: ${v ?? '—'}`).join(' · ') }) : badge(t('dg_unknown'))), shapeProbeCard(g)];
+  }
+
+  /** Read-only API data probe: which fields does the game expose for my linked account? Shape only, no personal values. */
+  function shapeProbeCard(g) {
+    const out = el('div', { id: 'probe-out' }); const btn = el('button', { class: 'btn', type: 'button', id: 'probe-run', text: t('probe_run') });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; out.replaceChildren(el('p', { class: 'muted', text: t('loading') }));
+      const r = await api('GET', `/api/guilds/${g}/diagnostics/api-shape`); btn.disabled = false;
+      if (!r.ok) { out.replaceChildren(el('p', { class: 'err', text: r.status === 409 ? t('probe_not_linked') : errText(r) })); return; }
+      const part = (name, d) => {
+        if (d.status !== 'ok') return el('p', { class: 'err' }, el('strong', { text: `${name}: ` }), document.createTextNode(`${t('probe_failed')} (${d.status})`));
+        const hints = d.skillHints.length ? d.skillHints.map((h) => `${h.path} = ${h.value}`).join('\n') : t('probe_no_hints');
+        return el('div', { class: 'probe-part' }, el('h4', { text: name }),
+          el('p', { class: d.skillKeysPresent ? 'ok' : 'warn', id: `probe-skill-${name}`, text: d.skillKeysPresent ? t('probe_skills_yes') : t('probe_skills_no') }),
+          el('pre', { class: 'probe-pre', dir: 'ltr', text: hints }), el('details', {}, el('summary', { text: t('probe_all_keys') }), el('pre', { class: 'probe-pre', dir: 'ltr', text: d.entries.map((e) => `${e.path}: ${e.type}`).join('\n') + (d.truncated ? '\n…' : '') })));
+      };
+      const dl = el('button', { class: 'btn', type: 'button', id: 'probe-copy', text: t('probe_copy') });
+      dl.addEventListener('click', async () => { try { await navigator.clipboard.writeText(JSON.stringify(r.data, null, 2)); toast(t('probe_copied')); } catch { toast(t('probe_copy_failed'), true); } });
+      out.replaceChildren(part('profile', r.data.profile), part('stats', r.data.stats), dl);
+    });
+    return el('div', { class: 'card', id: 'probe-card' }, el('h3', { text: t('probe_title') }), el('p', { class: 'muted', text: t('probe_intro') }), btn, out);
   }
 
   // ---------------------------------------------------------------- boot

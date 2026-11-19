@@ -200,6 +200,7 @@ describe('12. concurrent synchronization attempts are safe', () => {
     const h = await setup(); await map(h.db, 'A', 'president', ROLE.pres);
     for (const n of [1, 2, 3]) { await link(h.db, 'A', `d${n}`, `p${n}`); h.discord.give('A', `d${n}`); }
     roster(h, [{ userId: 'p1', role: 'president' }, { userId: 'p2', role: 'congress' }]);
+    h.discord.delayMs = 60;       // the first run must still be in progress when the second one asks (without it a fast machine can finish run 1 first: flaky)
     const deps: GuildSyncDeps = { db: h.db, game: h.game, discord: h.discord, sleep: noSleep };
     const [a, b] = await Promise.all([syncGuild(deps, { guildId: 'A', kind: 'all', requestedBy: 'x' }), syncGuild(deps, { guildId: 'A', kind: 'all', requestedBy: 'y' })]);
     expect([a.ok, b.ok].sort()).toEqual([false, true]); expect([a, b].find((r) => !r.ok)).toEqual({ ok: false, code: 'ALREADY_RUNNING' });

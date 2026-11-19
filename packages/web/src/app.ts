@@ -4,8 +4,8 @@ import fastifyCookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched, IDENTITY_KINDS, isIdentityKind, isProxyKind } from '@aon/core';
-import { SHARED_IDENTITY_KINDS } from '@aon/core';
-import { setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles } from '@aon/db';
+import { SHARED_IDENTITY_KINDS, describeShape } from '@aon/core';
+import { audit, getGlobalLinkForUser, setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles } from '@aon/db';
 import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
@@ -27,6 +27,8 @@ export interface WebGame {
   countryOptions?(): Promise<Fetched<EntityOption[]>>;
   searchUnits?(search: string, countryId?: string): Promise<Fetched<UnitSummary[]>>;
   entityName?(type: 'party' | 'unit', id: string): Promise<Fetched<string>>;
+  /** Raw JSON of the documented profile and stats endpoints, for the read-only API data probe. Absent => the probe answers `probe_unavailable`. */
+  playerRaw?(playerId: string): Promise<{ profile: Fetched<unknown>; stats: Fetched<unknown> }>;
 }
 export interface WebDeps {
   db: Db; cfg: WebConfig; oauth: DiscordOAuth; botRest: DiscordBotRest; game: WebGame;
@@ -229,6 +231,22 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const a = await guard(req, reply); if (!a) return;
     const h = deps.health ? await deps.health() : null;
     return { database: h?.database ?? true, discord: h?.discord ?? null, gameApi: h?.gameApi ?? null };     // no secrets, no tokens
+  });
+
+  /**
+   * READ-ONLY API data probe (M5a). For the administrator's OWN linked account (taken from the existing global link, never typed) it calls the two
+   * documented player endpoints and reports only the SHAPE of the answers (key paths and types, plus skill-looking numbers). It exists to find out whether,
+   * and in which fields, the game exposes skill data; it changes nothing and no personal value (name, bio, id, date) is ever returned.
+   */
+  app.get('/api/guilds/:guildId/diagnostics/api-shape', async (req, reply) => {
+    const a = await guard(req, reply); if (!a) return;
+    if (!entityLimit(`shape:${a.session.discordUserId}`)) return fail(reply, 429, 'rate_limited');
+    if (!deps.game.playerRaw) return fail(reply, 503, 'probe_unavailable');
+    const link = await getGlobalLinkForUser(db, a.session.discordUserId); if (!link) return fail(reply, 409, 'not_linked');
+    const raw = await deps.game.playerRaw(link.playerId);
+    const part = (r: Fetched<unknown>) => r.status === 'ok' ? { status: 'ok' as const, ...describeShape(r.data) } : { status: r.status };
+    await audit(db, { guildId: a.guildId, actor: a.session.discordUserId, action: 'diagnostics.api_shape', target: 'player', details: { profile: raw.profile.status, stats: raw.stats.status } });
+    return { profile: part(raw.profile), stats: part(raw.stats) };
   });
 
   // ------------------------------------------------------------------ settings
@@ -443,7 +461,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     const role = roles.find((r) => r.id === p.data.discordRoleId);
     if (!role || unusableRoles(roles, [p.data.discordRoleId]).length) return fail(reply, 422, 'role_invalid');
     const res = await addRoleMapping(db, { guildId: a.guildId, kind: p.data.kind, ...(p.data.gameRef ? { gameRef: p.data.gameRef } : {}), discordRoleId: p.data.discordRoleId, actor: a.session.discordUserId });
-    return res.ok ? { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind) && !isProxyKind(m.kind) && !isIdentityKind(m.kind)), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : res.code.toLowerCase());
+    return res.ok ? { mappings: (await listRoleMappings(db, a.guildId)).filter((m) => !isBuildKind(m.kind) && !isProxyKind(m.kind) && !isIdentityKind(m.kind)), warning: role.manageable ? null : role.reason } : fail(reply, res.code === 'ROLE_CONFLICT' || res.code === 'ROLE_ENTITY_DUPLICATE' ? 409 : 422, res.code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : res.code.toLowerCase());
   });
   app.delete('/api/guilds/:guildId/mappings/:mappingId', async (req, reply) => {
     const a = await guard(req, reply, { write: true }); if (!a) return;
@@ -459,7 +477,7 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
     return unusableRoles(roles, [roleId]).length ? 'invalid' : 'ok';
   };
   const mappingFail = (reply: FastifyReply, code: string) =>
-    fail(reply, code === 'ROLE_CONFLICT' || code === 'ROLE_IN_USE' ? 409 : 422, code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : code.toLowerCase());
+    fail(reply, code === 'ROLE_CONFLICT' || code === 'ROLE_IN_USE' || code === 'ROLE_ENTITY_DUPLICATE' ? 409 : 422, code === 'KIND_NOT_ALLOWED' ? 'kind_not_allowed_for_type' : code.toLowerCase());
   const countryName = async (id: string): Promise<string | null> => {
     const g = deps.game; if (!g.countryOptions) return null;
     const r = await cachedOptions('countries', () => g.countryOptions!()); return r.status === 'ok' ? (r.data.find((o) => o.id === id)?.name ?? null) : null;

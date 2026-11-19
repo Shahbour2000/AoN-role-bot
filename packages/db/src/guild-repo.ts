@@ -1,4 +1,4 @@
-import { ENTITY_MEMBER_KINDS, incompatibleMappings, isEntityMemberKind, isIdentityKind, isKindAllowed, isProxyKind, isSharedIdentityKind, type DemotionPolicy } from '@aon/core';
+import { ENTITY_MEMBER_KINDS, MEMBERSHIP_FAMILIES, membershipFamilyOf, incompatibleMappings, isEntityMemberKind, isIdentityKind, isKindAllowed, isProxyKind, isSharedIdentityKind, type DemotionPolicy } from '@aon/core';
 import { audit } from './audit.js';
 import type { Db } from './db.js';
 
@@ -53,7 +53,7 @@ export async function listRoleMappings(db: Db, guildId: string): Promise<RoleMap
   return rows.map((r) => ({ id: r.id, guildId: r.guild_id, kind: r.kind, gameRef: r.game_ref, discordRoleId: r.discord_role_id }));
 }
 
-export type MappingFailure = 'INVALID_KIND' | 'GAME_REF_REQUIRED' | 'DISCORD_ROLE_INVALID' | 'ROLE_CONFLICT' | 'KIND_NOT_ALLOWED' | 'GUILD_NOT_FOUND' | 'USE_DEDICATED' | 'ROLE_IN_USE' | 'SAME_AS_OWN_COUNTRY' | 'NOT_COUNTRY_SERVER';
+export type MappingFailure = 'INVALID_KIND' | 'GAME_REF_REQUIRED' | 'DISCORD_ROLE_INVALID' | 'ROLE_CONFLICT' | 'KIND_NOT_ALLOWED' | 'GUILD_NOT_FOUND' | 'USE_DEDICATED' | 'ROLE_IN_USE' | 'SAME_AS_OWN_COUNTRY' | 'NOT_COUNTRY_SERVER' | 'ROLE_ENTITY_DUPLICATE';
 export type SetMappingResult = { ok: true } | { ok: false; code: MappingFailure };
 /** Mapping kinds whose game value (raw role string) is mandatory: the game decides what the value is. */
 export const KINDS_NEEDING_GAME_VALUE: readonly string[] = ['government_role', 'party_role'];
@@ -68,6 +68,16 @@ async function lockGuild(t: Db, guildId: string): Promise<{ community_type: stri
   return (await t.query<{ community_type: string; country_id: string | null }>('SELECT community_type, country_id FROM guilds WHERE guild_id=$1 FOR UPDATE', [guildId])).rows[0] ?? null;
 }
 const roleIsRank = async (t: Db, guildId: string, roleId: string) => (await t.query('SELECT 1 FROM military_ranks WHERE guild_id=$1 AND discord_role_id=$2', [guildId, roleId])).rows.length > 0;
+
+/**
+ * One membership role per party / unit per server, across BOTH kinds of the family (generic `party_member` / `unit_member` with a game reference and
+ * `country_party_member` / `country_unit_member`): another membership row for the same entity with a different kind or role would hand the player
+ * two roles of one family. Re-saving the identical (kind, role) is idempotent and allowed. Call under the guild lock.
+ */
+const entityHasOtherMembershipRole = async (t: Db, guildId: string, kind: string, entityRef: string, roleId: string | null): Promise<boolean> => {
+  const fam = membershipFamilyOf(kind); if (!fam || !entityRef) return false;
+  return (await t.query(`SELECT 1 FROM role_mappings WHERE guild_id=$1 AND kind = ANY($2::text[]) AND game_ref=$3 AND NOT (kind=$4 AND ($5::text IS NULL OR discord_role_id=$5))`, [guildId, [...MEMBERSHIP_FAMILIES[fam]], entityRef, kind, roleId])).rows.length > 0;
+};
 
 export async function addRoleMapping(db: Db, a: { guildId: string; kind: string; gameRef?: string; discordRoleId: string; actor: string | null }): Promise<SetMappingResult> {
   if (!(ROLE_KINDS as readonly string[]).includes(a.kind)) return { ok: false, code: 'INVALID_KIND' };
@@ -84,6 +94,7 @@ export async function addRoleMapping(db: Db, a: { guildId: string; kind: string;
     // The OWN-country citizen role (no game reference) MAY be shared with proxy-country roles: that is the one intentional exception to role
     // exclusivity (proxy nationals get the same citizen role). A citizen role for some OTHER specific country still may not double as a proxy role.
     if (a.kind === 'citizen' && ref !== '' && (await t.query(`SELECT 1 FROM role_mappings WHERE guild_id=$1 AND discord_role_id=$2 AND kind='proxy_citizen'`, [a.guildId, a.discordRoleId])).rows.length) return { ok: false, code: 'ROLE_CONFLICT' };
+    if (ref && await entityHasOtherMembershipRole(t, a.guildId, a.kind, ref, a.discordRoleId)) return { ok: false, code: 'ROLE_ENTITY_DUPLICATE' };
     await t.query('INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING', [a.guildId, a.kind, ref, a.discordRoleId]);
     await t.query('DELETE FROM retired_rank_roles WHERE guild_id=$1 AND discord_role_id=$2', [a.guildId, a.discordRoleId]);     // re-used: no longer a leftover
     await audit(t, { guildId: a.guildId, actor: a.actor, action: 'mapping.added', target: a.kind, details: { gameRef: ref, discordRoleId: a.discordRoleId } });
@@ -178,6 +189,8 @@ export async function setEntityMemberRole(db: Db, a: { guildId: string; kind: st
     if (!isKindAllowed(g.community_type, a.kind)) return { ok: false, code: 'KIND_NOT_ALLOWED' };
     if (await roleIsRank(t, a.guildId, a.discordRoleId)) return { ok: false, code: 'ROLE_CONFLICT' };
     if (await identityRoleTaken(t, a.guildId, a.discordRoleId, { kind: a.kind, ref }) || await proxyRoleTaken(t, a.guildId, a.discordRoleId)) return { ok: false, code: 'ROLE_IN_USE' };
+    // the same party / unit may not also carry a generic per-party / per-unit membership mapping (one membership role per entity)
+    if (await t.query(`SELECT 1 FROM role_mappings WHERE guild_id=$1 AND kind = ANY($2::text[]) AND kind<>$3 AND game_ref=$4`, [a.guildId, [...MEMBERSHIP_FAMILIES[membershipFamilyOf(a.kind)!]], a.kind, ref]).then((r) => r.rows.length > 0)) return { ok: false, code: 'ROLE_ENTITY_DUPLICATE' };
     await t.query(`DELETE FROM role_mappings WHERE guild_id=$1 AND kind=$2 AND game_ref=$3`, [a.guildId, a.kind, ref]);
     await t.query(`INSERT INTO role_mappings (guild_id, kind, game_ref, discord_role_id) VALUES ($1,$2,$3,$4)`, [a.guildId, a.kind, ref, a.discordRoleId]);
     await t.query('DELETE FROM retired_rank_roles WHERE guild_id=$1 AND discord_role_id=$2', [a.guildId, a.discordRoleId]);

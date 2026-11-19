@@ -139,3 +139,39 @@ describe('entity-roles API: per-party / per-unit membership roles', () => {
     expect((await get(x.c, x.l, `${P()}/identity-roles`)).json().roles).toEqual({ country_party_president: null, country_unit_leader: null, country_unit_owner: R.e });
   });
 });
+
+describe('M1.1: one membership role per party / unit, across the generic and the country mapping', () => {
+  it('a party that already has a membership role (either kind) cannot get a second one: 409 role_entity_duplicate; a different party still can', async () => {
+    const x = await ctx(); const post = (body: unknown) => mut(x.c, x.l, 'POST', `${P()}/mappings`, body);
+    expect((await put(x, `${P()}/entity-roles/party/pa`, { discordRoleId: R.a })).statusCode).toBe(200);
+    const dup = await post({ kind: 'party_member', gameRef: 'pa', discordRoleId: R.b }); expect(dup.statusCode).toBe(409); expect(dup.json().error).toBe('role_entity_duplicate');
+    expect((await post({ kind: 'party_member', gameRef: 'pb', discordRoleId: R.b })).statusCode).toBe(200);
+    const dup2 = await put(x, `${P()}/entity-roles/party/pb`, { discordRoleId: R.e }); expect(dup2.statusCode).toBe(409); expect(dup2.json().error).toBe('role_entity_duplicate');
+    expect((await listRoleMappings(x.c.db, G1)).map((m) => `${m.kind}:${m.gameRef}`).sort()).toEqual(['country_party_member:pa', 'party_member:pb']);
+  });
+});
+
+describe('M5a: read-only API data probe (shape of the linked account\'s profile and stats; never personal values)', () => {
+  const PROFILE = { id: 'usr_SECRET_ID', username: 'SecretName', bio: 'a private bio', joinedAt: '2026-01-01T00:00:00Z', level: 29, party: { id: 'pa', name: 'Secret Party', role: 'leader' }, militaryUnit: null };
+  const link = async (x: X, playerId = 'player-123') => x.c.db.query(`INSERT INTO global_links (discord_user_id, player_id, player_username, method, verified_in_guild) VALUES ($1,$2,'SecretName','admin_forced',$3)`, [USER, playerId, G1]);
+  it('needs a linked account (409), takes the player id from the link (never from the browser) and reports shape only', async () => {
+    const x = await ctx(); const asked: string[] = [];
+    x.c.game.playerRaw = (async (id: string) => { asked.push(id); return { profile: { status: 'ok', data: { ...PROFILE, skills: [{ code: 'attack', level: 4, maxLevel: 10 }] } }, stats: { status: 'ok', data: { level: 29, damage: { all: 5 }, name: 'SecretName' } } }; }) as never;
+    expect((await get(x.c, x.l, `${P()}/diagnostics/api-shape`)).json().error).toBe('not_linked'); expect(asked).toEqual([]);
+    await link(x); const r = await get(x.c, x.l, `${P()}/diagnostics/api-shape`); expect(r.statusCode).toBe(200); expect(asked).toEqual(['player-123']);
+    const j = r.json(); expect(j.profile.status).toBe('ok'); expect(j.profile.skillKeysPresent).toBe(true); expect(j.stats.skillKeysPresent).toBe(false);
+    expect(j.profile.skillHints).toContainEqual({ path: 'skills[0].code', value: 'attack' }); expect(j.profile.skillHints).toContainEqual({ path: 'level', value: 29 });
+    const text = JSON.stringify(j); for (const secret of ['usr_SECRET_ID', 'SecretName', 'a private bio', '2026-01-01', 'Secret Party', 'player-123']) expect(text, secret).not.toContain(secret);
+    expect((await x.c.db.query(`SELECT details FROM audit_events WHERE guild_id=$1 AND action='diagnostics.api_shape'`, [G1])).rows).toHaveLength(1);
+    expect((await get(x.c, x.l, `${P()}/diagnostics/api-shape?playerId=other`)).statusCode).toBeLessThan(500);              // a browser-supplied id is simply ignored
+    expect(asked.every((a) => a === 'player-123')).toBe(true);
+  });
+  it('a failing endpoint is reported per part; no capability => 503; another server => 403; no session => 401', async () => {
+    const x = await ctx(); await link(x);
+    x.c.game.playerRaw = (async () => ({ profile: { status: 'error', message: 'down' }, stats: { status: 'ok', data: { level: 1 } } })) as never;
+    const j = (await get(x.c, x.l, `${P()}/diagnostics/api-shape`)).json(); expect(j.profile).toEqual({ status: 'error' }); expect(j.stats.status).toBe('ok');
+    delete (x.c.game as { playerRaw?: unknown }).playerRaw; expect((await get(x.c, x.l, `${P()}/diagnostics/api-shape`)).json().error).toBe('probe_unavailable');
+    expect((await get(x.c, x.l, `${P(G2)}/diagnostics/api-shape`)).statusCode).toBe(403);
+    expect((await x.c.app.inject({ method: 'GET', url: `${P()}/diagnostics/api-shape` })).statusCode).toBe(401);
+  });
+});

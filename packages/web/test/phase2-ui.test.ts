@@ -273,3 +273,17 @@ describe('Country roles page: per-party and per-unit membership roles', () => {
     const ar = await open(c, l, `#/g/${G1}/proxy`, 'ar'); await waitFor(() => ar.$('#em-card-party'), 'ar page'); expect(ar.$('#em-card-party h3')!.textContent).toContain('رتب عضوية الأحزاب'); expect(ar.$('#em-card-unit h3')!.textContent).toContain('الوحدات العسكرية');
   });
 });
+
+describe('Diagnostics page: read-only API data probe', () => {
+  it('shows the probe card; running it lists skill evidence (or says there is none), never personal values; an unlinked account gets a clear message; AR renders', async () => {
+    const { c, l } = await boot(); const p = await open(c, l, `#/g/${G1}/diag`); await waitFor(() => p.$('#probe-card'), 'card');
+    (c.game as unknown as { playerRaw: unknown }).playerRaw = async () => ({ profile: { status: 'ok', data: { username: 'SecretName', level: 29, skills: [{ code: 'attack', level: 4 }] } }, stats: { status: 'ok', data: { level: 29 } } });
+    click(p, p.$('#probe-run')); await waitFor(() => p.$('#probe-out .err'), 'not linked'); expect(p.$('#probe-out')!.textContent).toContain('not linked to a game account');
+    await c.db.query(`INSERT INTO global_links (discord_user_id, player_id, player_username, method, verified_in_guild) VALUES ('42','pl1','SecretName','admin_forced',$1)`, [G1]);
+    click(p, p.$('#probe-run')); await waitFor(() => p.$('#probe-skill-profile'), 'result');
+    expect(p.$('#probe-skill-profile')!.textContent).toContain('"skill" exists'); expect(p.$('#probe-skill-stats')!.textContent).toContain('No skill field');
+    const text = p.$('#probe-out')!.textContent!; expect(text).toContain('skills[0].code = attack'); expect(text).toContain('level = 29'); expect(text).not.toContain('SecretName');
+    expect(p.$('#probe-copy')).not.toBeNull();
+    const ar = await open(c, l, `#/g/${G1}/diag`, 'ar'); await waitFor(() => ar.$('#probe-card h3'), 'ar'); expect(ar.$('#probe-card h3')!.textContent).toContain('فحص بيانات اللعبة');
+  });
+});

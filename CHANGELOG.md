@@ -1,5 +1,21 @@
 # Changelog
 
+## M1.1 — strict one-party / one-unit membership; read-only API data probe (M5a)
+**Changed**
+- Sync (`member-sync.ts`): `enforceOneMembershipRole` — if more than one DIFFERENT Discord role of a membership family (party: `party_member` + `country_party_member`; unit: `unit_member` + `country_unit_member`; mappings with a game reference) would qualify at once, none is granted, nothing is removed, `membership_conflict:<family>` is reported. Roles of entities the player is not in stay "not qualifies" and are removed as before.
+- Sync: before WRITING a membership role change the profile is re-read once; if party / unit membership differs, the plan is recomputed from the fresh data (`rechecked`); a failed re-read keeps the first read (`profile_recheck` lookup). Runs without a membership change make no extra request.
+- Mapping writers (`addRoleMapping`, `setEntityMemberRole`) refuse a second membership role for one party / unit across the generic and country kinds (`ROLE_ENTITY_DUPLICATE`, HTTP 409 `role_entity_duplicate`, AR/EN message); re-saving the identical mapping stays idempotent; dedicated party / unit servers (no game reference) are unchanged. No migration.
+**Added**
+- `@aon/core`: `MEMBERSHIP_FAMILIES`, `membershipFamilyOf`, `describeShape` (pure shape describer; never copies strings).
+- Read-only API data probe (roadmap M5a): `AonClient.playerRaw`, `GET /api/guilds/:g/diagnostics/api-shape` (own linked account only, audited), Diagnostics page card with copy-to-clipboard JSON; AR/EN.
+**Tests:** new `sync/test/strict-membership.test.ts` (two exhaustive matrices of 144 combinations, swap / leave / foreign / unknown, conflicts, re-check, overlapping syncs on real PG), db duplicate + concurrency tests, web API + jsdom tests, `core/test/shape.test.ts`. Updated: the M1 sync test that mapped one party through both kinds (now asserts the refusal). Fixed a flaky pre-existing test (`reconcile › two simultaneous /sync all`: now deterministic).
+**Unchanged:** Delivery A, Delivery B, M1 behaviour, all migrations.
+
+## Roadmap v3 — planning only (no code change)
+- Added `docs/ROADMAP.md`: the updated complete roadmap (M1.1, M2a, M2b, M3, M4, M5a, M5b, M5c) with design, affected files, database / API changes, test plans, measurable acceptance criteria and open questions for the three new requirements: strict one-party / one-unit membership, optional Unverified-role removal after verification, skill-point based War / Economy / Hybrid classification.
+- `PROJECT_STATUS.md`: pointer to the roadmap, builds row updated (the old formula is superseded; blocked on missing skill data).
+- No source, test or migration file changed; Delivery A, Delivery B and M1 are untouched.
+
 ## M1 — role-system corrections: shared citizen role, per-party / per-unit membership roles, server-side country isolation
 **Fixed / changed**
 - **Shared citizen role.** The own-country citizen role and proxy-country roles (any number) may now be the same Discord role (previously refused in `addRoleMapping`, `setProxyCountry` and by a unique index). Still refused: a proxy role that is a party / unit / president / leader / owner role, a military-rank role, or the citizen role of another specific country. Synchronisation already merged rules that point at one role (qualifies > unknown > not-qualifies); new tests prove grant / removal / nationality changes / unreadable data.

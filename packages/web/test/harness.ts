@@ -65,6 +65,8 @@ export class FakePanelPublisher implements PanelPublisher {
 }
 export interface Ctx { panel: FakePanelPublisher; unlinked: [string, string, string[]][]; app: FastifyInstance; db: Db; oauth: FakeOAuth; bot: FakeBotRest; clock: { now: Date }; syncCalls: [string, string][]; logs: string[]; pub: string; game: FakeGameWeb }
 export class FakeGameWeb {
+  /** Optional raw-endpoint capability for the API data probe (tests set it when needed). */
+  playerRaw?: (playerId: string) => Promise<{ profile: Fetched<unknown>; stats: Fetched<unknown> }>;
   player: Fetched<{ id: string; username: string | null }> = { status: 'ok', data: { id: 'usr_p1', username: 'Alpha' } };
   parties: Fetched<never[]> = { status: 'ok', data: [] };
   /** Phase 3 selectors. `calls` records every upstream request so tests can prove caching. */

@@ -212,3 +212,33 @@ describe('country party / unit MEMBERSHIP roles (one role per entity)', () => {
     expect(res.filter((r) => !r.ok).every((r) => !r.ok && r.code === 'ROLE_IN_USE')).toBe(true);
   });
 });
+
+describe('M1.1: one membership role per party / unit across BOTH membership kinds', () => {
+  const entity = (kind: string, id: string, role: number) => setEntityMemberRole(db, { guildId: 'A', kind, entityId: id, discordRoleId: R(role), actor: null });
+  const generic = (kind: string, ref: string, role: number) => addRoleMapping(db, { guildId: 'A', kind, gameRef: ref, discordRoleId: R(role), actor: null });
+  it('a party / unit that already has a membership role cannot get a second one of the other kind or with another role; the identical mapping is idempotent', async () => {
+    expect(await entity('country_party_member', 'pa', 1)).toEqual({ ok: true });
+    expect(await generic('party_member', 'pa', 2)).toMatchObject({ ok: false, code: 'ROLE_ENTITY_DUPLICATE' });                 // generic after country
+    expect(await generic('party_member', 'pb', 2)).toEqual({ ok: true });                                                          // another party: fine
+    expect(await entity('country_party_member', 'pb', 3)).toMatchObject({ ok: false, code: 'ROLE_ENTITY_DUPLICATE' });             // country after generic
+    expect(await generic('party_member', 'pb', 2)).toEqual({ ok: true });                                                          // identical row: idempotent
+    expect(await generic('party_member', 'pb', 4)).toMatchObject({ ok: false, code: 'ROLE_ENTITY_DUPLICATE' });                    // same party, second role, same kind
+    expect(await entity('country_unit_member', 'mu1', 5)).toEqual({ ok: true });
+    expect(await generic('unit_member', 'mu1', 6)).toMatchObject({ ok: false, code: 'ROLE_ENTITY_DUPLICATE' });
+    expect(await generic('unit_member', 'pa', 7)).toEqual({ ok: true });                                                           // families are separate: a unit mapping never collides with a party id
+    expect(await entity('country_party_member', 'pa', 8)).toEqual({ ok: true });                                                   // replacing the country row of the same party stays possible
+    const m = (await listRoleMappings(db, 'A')).filter((x) => /party_member|unit_member/.test(x.kind)).map((x) => [x.kind, x.gameRef, x.discordRoleId]).sort();
+    expect(m).toEqual([['country_party_member', 'pa', R(8)], ['country_unit_member', 'mu1', R(5)], ['party_member', 'pb', R(2)], ['unit_member', 'pa', R(7)]].sort());
+  });
+  it('dedicated party / unit servers (mappings without a game reference) keep allowing several roles', async () => {
+    expect(await generic('party_member', '', 1)).toEqual({ ok: true }); expect(await generic('party_member', '', 2)).toEqual({ ok: true });
+  });
+  it('concurrency on a real database: a generic and a country writer racing for the SAME party leave exactly one row; racing writers for different parties both win', async () => {
+    for (let i = 0; i < 6; i++) {
+      const ref = `pr${i}`; const res = await Promise.all([generic('party_member', ref, 10 + i * 2), entity('country_party_member', ref, 11 + i * 2), generic('party_member', ref, 30 + i)]);
+      expect(res.filter((r) => r.ok).length, `round ${i}`).toBeGreaterThanOrEqual(1);
+      const rows = (await listRoleMappings(db, 'A')).filter((x) => x.gameRef === ref && /party_member/.test(x.kind)); expect(new Set(rows.map((r) => r.discordRoleId)).size, `round ${i}`).toBe(1);
+    }
+    const both = await Promise.all([entity('country_party_member', 'px', 60), generic('party_member', 'py', 61)]); expect(both.every((r) => r.ok)).toBe(true);
+  });
+});
