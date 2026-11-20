@@ -83,3 +83,14 @@ of *this* server, and the bot needs View Channel, Send Messages and Embed Links 
 * A panel posted **before** this version by `/admin verify-panel` is not tracked: the first dashboard publish posts a new one; delete the old message by hand. The old button keeps working.
 
 Permissions: dashboard = same gate as every other settings route (Discord owner / Administrator / Manage Server, re-read from Discord, CSRF + same-origin on writes, per-session write rate limit). Trusted bot-administrator roles come in a later phase and will plug into this same gate.
+
+## Optional: remove the server's "Unverified" role after a successful verification (M2a)
+Many servers give every new member a role such as "Unverified" / "غير موثق". Dashboard -> **Verification** -> *Remove the "Unverified" role after verification*: a toggle plus a searchable role picker. **Off by default** for every server (existing installations change nothing).
+
+When enabled, after a member verifies (a new verification **or** an existing global link activated in this server) the bot first runs the normal role synchronisation (citizen role etc.) and then removes the configured role if the member holds it. Rules:
+* Only that one role is ever removed. The role must exist in this server, must not be `@everyone` or an integration role, must be below the bot's highest role, and must not be a role the bot manages for anything else (citizen, proxy, party, unit, president / leader / owner, build, military-rank roles). This is checked when saving, again right before removing, and in the other direction: once enabled, the mapping / rank / build / proxy writers refuse that role.
+* If the role synchronisation did not complete (an error, or a planned role could not be written), the Unverified role is **kept** and the skip is written to the audit log, so nobody ends with neither role.
+* A member who no longer holds the role costs no Discord call and is not an error. Repeating the step is harmless.
+* A failure (missing permission, deleted role, Discord outage) never changes the verification result or the reply. Rate limits and 5xx errors are retried once. Everything is audited: `verification.unverified_removed`, `verification.unverified_removal_skipped` (with a reason), `verification.unverified_removal_failed` (with a reason); changing the setting is audited as `verification.unverified_role.set`.
+* The setting belongs to one server; a verification or link activation in another server uses that server's own setting.
+* Migration `0013` (two columns on `guilds`).

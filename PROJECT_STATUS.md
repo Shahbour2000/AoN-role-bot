@@ -1,13 +1,13 @@
 # AoN Role Bot — project status
 
-Updated for **M1.1 (strict one-party / one-unit membership + API data probe, section "M1.1 — this delivery")**, on top of **M1 (role-system corrections)**, on top of **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
+Updated for **M2a (optional Unverified-role removal, section "M2a — this delivery")**, on top of **M1.1 (strict one-party / one-unit membership + API data probe)**, on top of **M1 (role-system corrections)**, on top of **Delivery B: proxy countries, country-wide party/unit roles, searchable role & entity pickers, trusted bot administrators, guild-lock concurrency fix** (on top of Delivery A, which the owner tested on the live server and accepted, and Phase 1). Base: the repository as uploaded after the dashboard hotfix
 (no `.git` metadata in the upload, so no commit hash can be stated). Statuses: **COMPLETE** implemented and verified · **PARTIAL** implemented but
 incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evidence") · **BLOCKED** genuine external limitation · **NOT STARTED**.
 
 **Evidence levels used below:** *mock* = fakes for Discord / game API · *PGlite* = in-process PostgreSQL · *PG16* = real PostgreSQL 16 server ·
 *jsdom* = simulated browser. **Nothing has been verified against real Discord, the live game API, a real browser, or the production host.**
 
-> **ROADMAP v3 (approved):** three requirements were added after M1 (strict one-party / one-unit membership, optional Unverified-role removal, skill-point War / Eco / Hybrid). M1.1 (requirement 1) and the read-only probe M5a are now implemented; M2a, M2b, M3, M4, M5b, M5c are not. The complete updated roadmap, design, test plan, acceptance criteria and open questions are in **`docs/ROADMAP.md`**. New order: M1.1 → M2a → M2b → M3 → M4 → M5a → M5b → M5c. The skill-based classification (M5b) is **BLOCKED on data**: the API reference and the real profile samples contain no skill information.
+> **ROADMAP v3 (approved):** three requirements were added after M1 (strict one-party / one-unit membership, optional Unverified-role removal, skill-point War / Eco / Hybrid). M1.1 and the probe M5a are in production; M2a is delivered; M2b, M3, M4, M5b, M5c are not implemented. The probe output UNBLOCKED M5b (skill data confirmed; the Prestige budget is the one open point): see `docs/ROADMAP.md` section 5.6. The owner's sync-result-embed request is placed in M2b (section 9). The complete updated roadmap, design, test plan, acceptance criteria and open questions are in **`docs/ROADMAP.md`**. New order: M1.1 → M2a → M2b → M3 → M4 → M5a → M5b → M5c. The skill-based classification (M5b) is **BLOCKED on data**: the API reference and the real profile samples contain no skill information.
 
 ## Roadmap requested by the owner (priority order) — where each item stands
 | # | Requirement | Status |
@@ -20,7 +20,30 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | 6 | Guild-level lock (server type vs mappings); stale-response protection in pickers | **Delivery B: both fixed.** Lock proven on real PostgreSQL 16 (red/green); stale fix has a red/green test for one of two scenarios. |
 | – | Phase 3-6 items from the older plan (nickname sync, build roles formula, alliance, …) | unchanged, see the older phase tables below |
 
-## M1.1 — this delivery (strict one-party / one-unit membership + read-only API data probe)
+## M2a — this delivery (optional Unverified-role removal after verification)
+| Requirement (docs/ROADMAP.md §4) | What exists now | Status | Evidence |
+|---|---|---|---|
+| Optional, disabled by default | migration `0013`: `guilds.unverified_role_enabled` (default false) + `unverified_role_id`; DB checks (enabled needs a role, id format) | COMPLETE (code) | db migration upgrade test on **PG16 and PGlite** |
+| Dashboard setting: toggle + searchable role selector | *Verification* page card; API `PUT /api/guilds/:g/verification/unverified-role`; `GET .../verification` returns the setting; AR / EN | COMPLETE (code) | API 4, jsdom 2 |
+| Validation | role must exist in THIS server, not @everyone / integration / dangerous, below the bot and manageable (`role_not_removable`), not a role the bot manages (409 `role_conflict`); a disabled setting may keep a deleted role | COMPLETE | API matrix, db tests |
+| Never removes the citizen role or other managed roles | refused when saving; mapping / proxy / identity / entity / build / rank writers refuse the role once enabled (under the guild lock); a last guard before removing re-checks `role_mappings` + ranks | COMPLETE | db tests incl. a concurrent-writer race on **PG16**, sync tests (settings bypassed => skipped) |
+| Order: existing verification and citizen role first, then removal | `verification.ts`: `syncNote` (grants roles) then `removeUnverifiedRole`; call log shows grant before removal | COMPLETE | bot flow tests (real ticket flow) |
+| Both success points | new verification (`checkTicket`) and an existing global link activated in this server (`openTicket`), each with that server's own setting | COMPLETE | bot flow test |
+| Retry-safe, idempotent, never breaks verification | absent role = no call; second run no-op; transient errors retried once; permanent errors not retried; unexpected throw caught; reply text identical to the disabled case | COMPLETE | sync 10, bot 7 |
+| Hierarchy / permission / deleted role / Discord outage handling | `role_not_removable` skip without an attempt; 50013 `missing_permissions`, 10011 and 10007 moot; every outcome audited | COMPLETE (mock Discord) | sync tests |
+| Existing behaviour preserved | disabled => call log and reply identical to before; Delivery A, B, M1, M1.1 tests unchanged and green | COMPLETE | all suites |
+| Roadmap docs updated with the M5a evidence | `docs/ROADMAP.md` 5.6 / 5.7 (skill groups, cost schedule, rule, Prestige open point), section 9 (sync embeds in M2b) | COMPLETE (docs) | – |
+
+**Decisions taken (defaults you approved):** removal at both verification points; kept when the role synchronisation did not complete; no extra line in the reply; removal only at verification time (not at every sync).
+
+**Limitations (M2a)**
+1. A member who is not verified through the bot (admin force-link, legacy links) keeps the Unverified role: the feature runs only on verification / link activation.
+2. If the removal fails (e.g. the bot lost Manage Roles) the member keeps the role until an administrator removes it by hand; the failure is in the audit log (`verification.unverified_removal_failed`), not shown in the dashboard yet (the verification log channel in M2b will show it).
+3. "Sync did not complete" is decided from the role synchronisation result of that member (error, or any role the bot could not write); a role blocked for an unrelated reason also keeps the Unverified role (conservative).
+4. Not run: real Discord, the live game API, a real browser, production.
+5. Not done in this delivery by design: the sync-result embeds (M2b), M3, M4, M5b.
+
+## M1.1 (previous delivery: strict one-party / one-unit membership + read-only API data probe)
 | Requirement (docs/ROADMAP.md §3, §5.3) | What exists now | Status | Evidence |
 |---|---|---|---|
 | A player holds at most ONE party membership role and ONE unit membership role | sync: if more than one DIFFERENT role of a membership family would qualify (legacy / ambiguous data) none is granted, nothing is removed, `membership_conflict` is reported; writers refuse a second membership role for one entity (`ROLE_ENTITY_DUPLICATE`, HTTP 409) across the generic (`party_member` / `unit_member`) and country (`country_*_member`) kinds | COMPLETE (code) | sync, db, API tests on PG16 |
@@ -184,7 +207,18 @@ incomplete · **UNVERIFIED** implemented but not sufficiently tested (see "Evide
 | Multi-server isolation, server-side authorisation, CSRF | COMPLETE (sandbox) | API/auth tests incl. new routes; never pen-tested |
 | Dockerfile / deployment | UNVERIFIED | never built |
 
-## Test results of M1.1 (this delivery)
+## Test results of M2a (this delivery)
+| Suite | Backend | Result |
+|---|---|---|
+| typecheck, 6 packages | – | clean (no separate build script exists in the repository) |
+| core / aon-client | pure | 107 / 68 passed |
+| db | **PG16** (new files also PGlite) | 143 passed |
+| sync | **PG16** | 147 passed |
+| bot | **PG16** | 114 passed |
+| web | **PG16** | 282 passed (11 files) |
+Real PostgreSQL 16.15 for migrations / locking / concurrency; everything else is mock / jsdom. **Not run:** real Discord, the live game API, a real browser, production.
+
+## Test results of M1.1 (previous)
 | Suite | Backend | Result |
 |---|---|---|
 | typecheck, 6 packages | – | clean |

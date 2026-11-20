@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from 'zod';
 import { DEFAULT_PANEL_COLOR, MODULES_BY_TYPE, ENTITY_BY_TYPE, PANEL_BUTTON_STYLES, PANEL_DEFAULTS, PANEL_LIMITS, allowedKinds, allowedModules, disallowedEnabledModules, isKindAllowed, panelFingerprint, resolvePanel, validatePanelInput, type Fetched, IDENTITY_KINDS, isIdentityKind, isProxyKind } from '@aon/core';
 import { SHARED_IDENTITY_KINDS, describeShape } from '@aon/core';
-import { audit, getGlobalLinkForUser, setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles } from '@aon/db';
+import { audit, getGlobalLinkForUser, setUnverifiedRole, setEntityMemberRole, removeEntityMemberRole, listEntityMemberRoles } from '@aon/db';
 import { partyOptions, unitOptions, type EntityOption, type PartySummary, type PlayerIdentity, type UnitSummary } from '@aon/client';
 import {
   ROLE_KINDS, BUILD_ROLE_KEYS, CountryReservedError, IncompatibleMappingsError, getCountryReservation, isCountryReservedByOther, releaseCountry, addRoleMapping, getBuildRoles, isBuildKind, setBuildRoles, unlinkWithRoles, cancelSyncJob, countLinksByStatus, createSessionRow, deleteSessionRow, forceLink, getGuildConfig, getLadder, getSessionRow, guildExists,
@@ -356,7 +356,24 @@ export async function buildApp(deps: WebDeps): Promise<FastifyInstance> {
   app.get('/api/guilds/:guildId/verification', async (req, reply) => {
     const a = await guard(req, reply); if (!a) return;
     const [stats, cfg] = await Promise.all([verificationStats(db, a.guildId, clock()), getGuildConfig(db, a.guildId)]);
-    return { channelId: cfg?.verificationChannelId ?? null, ...stats };
+    return { channelId: cfg?.verificationChannelId ?? null, unverifiedRole: { enabled: cfg?.unverifiedRoleEnabled ?? false, roleId: cfg?.unverifiedRoleId ?? null }, ...stats };
+  });
+  /**
+   * Optional: remove this server's "Unverified" role from a member after a successful verification. Disabled by default. The role must exist in THIS
+   * server, be one the bot can remove (below the bot, not managed, not @everyone) and not be a role the bot manages for any other purpose (citizen, ...).
+   */
+  app.put('/api/guilds/:guildId/verification/unverified-role', async (req, reply) => {
+    const a = await guard(req, reply, { write: true }); if (!a) return;
+    const body = z.object({ enabled: z.boolean(), roleId: z.string().regex(SNOWFLAKE).nullable() }).strict().safeParse(req.body);
+    if (!body.success) return fail(reply, 422, 'validation');
+    if (body.data.enabled && body.data.roleId === null) return fail(reply, 422, 'role_required');
+    if (body.data.enabled && body.data.roleId !== null) {                                   // a DISABLED setting may keep a role that no longer exists; an enabled one must be usable now
+      const ru = await usableRole(a.guildId, body.data.roleId); if (ru === 'unavailable') return fail(reply, 503, 'discord_unavailable'); if (ru === 'invalid') return fail(reply, 422, 'role_invalid');
+      // the bot must be able to REMOVE it: Manage Roles and the role below the bot's top role (a role above the bot would fail on every verification)
+      const found = (await rolesFor(a.guildId))?.find((r) => r.id === body.data.roleId); if (found && !found.manageable) return fail(reply, 422, 'role_not_removable');
+    }
+    const res = await setUnverifiedRole(db, { guildId: a.guildId, enabled: body.data.enabled, roleId: body.data.roleId, actor: a.session.discordUserId });
+    return res.ok ? { ok: true, unverifiedRole: body.data } : fail(reply, res.code === 'ROLE_CONFLICT' ? 409 : 422, res.code.toLowerCase());
   });
 
   // ------------------------------------------------------------------ verification panel (customise + publish)

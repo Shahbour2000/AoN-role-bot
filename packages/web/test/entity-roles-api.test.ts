@@ -175,3 +175,40 @@ describe('M5a: read-only API data probe (shape of the linked account\'s profile 
     expect((await x.c.app.inject({ method: 'GET', url: `${P()}/diagnostics/api-shape` })).statusCode).toBe(401);
   });
 });
+
+describe('M2a: optional Unverified-role removal setting', () => {
+  const uv = (x: X, body: unknown) => put(x, `${P()}/verification/unverified-role`, body);
+  it('is disabled by default; saving enables it for a usable role of THIS server; the setting is returned with the verification stats and audited', async () => {
+    const x = await ctx(); expect((await get(x.c, x.l, `${P()}/verification`)).json().unverifiedRole).toEqual({ enabled: false, roleId: null });
+    expect((await uv(x, { enabled: true, roleId: R.e })).json()).toMatchObject({ ok: true, unverifiedRole: { enabled: true, roleId: R.e } });
+    expect((await get(x.c, x.l, `${P()}/verification`)).json().unverifiedRole).toEqual({ enabled: true, roleId: R.e });
+    expect((await uv(x, { enabled: false, roleId: R.e })).statusCode).toBe(200); expect((await get(x.c, x.l, `${P()}/verification`)).json().unverifiedRole).toEqual({ enabled: false, roleId: R.e });
+    const ev = (await x.c.db.query<{ actor_discord_id: string; details: { enabled: boolean } }>(`SELECT actor_discord_id, details FROM audit_events WHERE guild_id=$1 AND action='verification.unverified_role.set' ORDER BY id`, [G1])).rows;
+    expect(ev.map((e) => e.details.enabled)).toEqual([true, false]); expect(ev.every((e) => e.actor_discord_id === USER)).toBe(true);
+  });
+  it('validation: shape, missing role, roles that do not exist / are @everyone / managed / above the bot; a disabled setting may keep a role that no longer exists', async () => {
+    const x = await ctx();
+    for (const body of [{}, { enabled: true }, { enabled: 'yes', roleId: R.e }, { enabled: true, roleId: 'abc' }, { enabled: true, roleId: R.e, extra: 1 }]) expect((await uv(x, body)).statusCode, JSON.stringify(body)).toBe(422);
+    expect((await uv(x, { enabled: true, roleId: null })).json().error).toBe('role_required');
+    for (const id of ['999999999', G1, R.d]) expect((await uv(x, { enabled: true, roleId: id })).json().error, id).toBe('role_invalid');
+    expect((await uv(x, { enabled: true, roleId: R.c })).json().error).toBe('role_not_removable');                                  // above the bot: it could never be removed
+    expect((await get(x.c, x.l, `${P()}/verification`)).json().unverifiedRole).toEqual({ enabled: false, roleId: null });                // nothing was saved
+    expect((await uv(x, { enabled: false, roleId: '999999999' })).statusCode).toBe(200);
+    x.c.bot.down = true; expect((await uv(x, { enabled: true, roleId: R.e })).statusCode).toBe(503); expect((await uv(x, { enabled: false, roleId: null })).statusCode).toBe(200);
+  });
+  it('a role the bot manages (citizen, proxy, party, ...) is refused with 409, and once enabled the mapping endpoints refuse that role', async () => {
+    const x = await ctx(); await mut(x.c, x.l, 'POST', `${P()}/mappings`, { kind: 'citizen', discordRoleId: R.a });
+    expect((await uv(x, { enabled: true, roleId: R.a })).json().error).toBe('role_conflict'); expect((await uv(x, { enabled: true, roleId: R.a })).statusCode).toBe(409);
+    expect((await uv(x, { enabled: true, roleId: R.b })).statusCode).toBe(200);
+    const pm = await mut(x.c, x.l, 'POST', `${P()}/mappings`, { kind: 'president', discordRoleId: R.b }); expect([pm.statusCode, pm.json().error]).toEqual([409, 'role_conflict']);
+    expect((await put(x, `${P()}/proxy-countries/pl`, { discordRoleId: R.b })).statusCode).toBe(409);
+    expect((await put(x, `${P()}/entity-roles/party/pa`, { discordRoleId: R.b })).statusCode).toBe(409);
+    expect((await put(x, `${P()}/identity-roles`, { kind: 'country_unit_owner', roleId: R.b })).statusCode).toBe(409);
+  });
+  it('authorization: another server is forbidden, a write without the CSRF token is refused, nothing is saved', async () => {
+    const x = await ctx(); expect((await uv({ ...x }, { enabled: true, roleId: R.e })).statusCode).toBe(200);
+    const y = await ctx(); expect((await put(y, `${P(G2)}/verification/unverified-role`, { enabled: true, roleId: R.e })).statusCode).toBe(403);
+    const noCsrf = await y.c.app.inject({ method: 'PUT', url: `${P()}/verification/unverified-role`, cookies: y.l.cookies, headers: { origin: 'http://localhost' }, payload: { enabled: true, roleId: R.e } }); expect(noCsrf.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await get(y.c, y.l, `${P()}/verification`)).json().unverifiedRole.enabled).toBe(false);
+  });
+});

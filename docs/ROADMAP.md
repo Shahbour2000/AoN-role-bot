@@ -1,4 +1,4 @@
-# Roadmap (v3, approved) — M1.1 and M5a delivered; the rest is not implemented yet
+# Roadmap (v3, approved) — M1.1 and M5a done, M2a delivered; the rest is not implemented yet
 
 Status: **APPROVED with the default answers to Q1–Q9.** M1.1 + M5a are delivered. Written after M1 was deployed and confirmed in production. Every completed delivery stays as it is (Delivery A, Delivery B, M1). This document adds three requirements to the existing roadmap; it does not redesign the project.
 
@@ -9,13 +9,13 @@ Status: **APPROVED with the default answers to Q1–Q9.** M1.1 + M5a are deliver
 | – | Delivery A | verification ticket panel, global linking, company-name verification | – | 0009, 0010 | **DONE** (production) |
 | – | Delivery B | proxy countries, country-wide roles (old model), pickers, trusted admins, guild lock | A | 0011 | **DONE** |
 | – | M1 | shared citizen role, per-party / per-unit membership roles, shared president / leader / owner, server-side country isolation | B | 0012 | **DONE** (production) |
-| **M1.1** | strict one-party / one-unit membership (**new req. 1**) + read-only API shape probe (see M5a) | hardening of the M1 sync rules | M1 | none (no index: application-level check under the guild lock) | **DELIVERED** (awaiting your production confirmation) |
-| **M2a** | optional Unverified-role removal (**new req. 2**) + a shared "verification outcome" result object | verification success path, verification settings card | M1 | 0013 (2 columns on `guilds`) | PLANNED |
-| M2b | verification log channel, durable outbox, "new link vs activated in another server" events (original M2) | the outcome object from M2a (roles granted / removed) | M2a | 0014 | PLANNED |
+| **M1.1** | strict one-party / one-unit membership (**new req. 1**) + read-only API shape probe (see M5a) | hardening of the M1 sync rules | M1 | none (no index: application-level check under the guild lock) | **DONE** (in production) |
+| **M2a** | optional Unverified-role removal (**new req. 2**) + a shared "verification outcome" result object | verification success path, verification settings card | M1 | 0013 (2 columns on `guilds`) | **DELIVERED** (awaiting your production confirmation) |
+| M2b | verification log channel, durable outbox, "new link vs activated in another server" events (original M2) **+ the reusable localized sync-result embed formatter (owner request, section 9)** | the outcome object from M2a (roles granted / removed) | M2a | 0014 | PLANNED |
 | M3 | names instead of IDs everywhere, verification history search / filters / pagination / detail (original M3) | M2b events table | M2b | none planned | PLANNED |
 | M4 | professional dashboard redesign on every page + custom scrollbar (original M4) | – | M3 (so the new tables are redesigned once) | none | PLANNED |
-| **M5a** | **evidence for skill data** (read-only API shape probe, run by the bot on a linked account) (**new req. 3, part 1**) | – | – | none | **DELIVERED inside M1.1** — run it and send me the JSON |
-| **M5b** | **skill-point based War / Economy / Hybrid classification + role sync** (**new req. 3, part 2**) | M5a evidence **and** owner answers in section 7 | M5a | none planned (role kinds `build_war/eco/hybrid` exist since 0007) | PLANNED, **BLOCKED on data** |
+| **M5a** | **evidence for skill data** (read-only API shape probe, run by the bot on a linked account) (**new req. 3, part 1**) | – | – | none | **DONE** — probe output received (section 5.6) |
+| **M5b** | **skill-point based War / Economy / Hybrid classification + role sync** (**new req. 3, part 2**) | M5a evidence **and** owner answers in section 7 | M5a | none planned (role kinds `build_war/eco/hybrid` exist since 0007) | PLANNED — **UNBLOCKED** (skill data confirmed, section 5.6); stays after M4 in the original order |
 | M5c | remaining original roadmap: nickname synchronisation, per-unit Owner mapping, other PARTIAL items in the phase tables of PROJECT_STATUS.md | – | M5b not required | later | PLANNED |
 
 Order is unchanged for the original items (M2 → M3 → M4 → M5). The new items are inserted as sub-milestones: M1.1 first because it hardens what M1 just shipped; M2a before M2b because the log embed must list roles granted **and** removed by the same operation; M5 is split because its data does not exist yet (section 5).
@@ -107,6 +107,24 @@ Integer examples (assuming a verified cost schedule). Note: at level 29, B = 112
 * **A3.8** Old tests of the previous formula are replaced (listed in the delivery report); dashboard + AR / EN parity tests.
 * **A3.9** Delivery gate: the report states which of the skill fields were **verified against real API output** (from M5a) and which were not.
 
+
+### 5.6 Evidence received (M5a probe output, authoritative) and the resulting M5b specification
+**Verified by the probe** (profile endpoint `GET /players/{id}`; the stats endpoint has no skills, as expected): `skills` is an array of 15 objects `{code, level, maxLevel}`; `level` (number) and `prestige` (number) are present. Codes: `energy, stamina, health, hunger, attack, companies, entrepreneurship, production, criticalChance, criticalDamages, armor, precision, dodge, lootChance, management`. `stamina` has `maxLevel = 0`; every other skill has `maxLevel = 10`. Skills are identified by `code`, never by array position.
+
+**Skill groups (owner decision, replaces the provisional lists and answers Q6):**
+* Economic (5): `energy`, `companies`, `entrepreneurship`, `production`, `management`.
+* War (9): `health`, `hunger`, `attack`, `criticalChance`, `criticalDamages`, `armor`, `precision`, `dodge`, `lootChance`.
+* Non-investable: `stamina` (`maxLevel = 0`, contributes to neither group). Any other / unknown code => the classification is **insufficient** (never counted silently) and a diagnostic is recorded.
+
+**Cost schedule (owner-supplied from the wiki file `01-basics.md`, which I do not have):** cost of reaching level 1..10 = 1, 1, 2, 3, 4, 5, 6, 8, 9, 10; cumulative points at level L = sum of the first L costs: 0, 1, 2, 4, 7, 11, 16, 22, 30, 39, 49. Same for every skill. (Note for the implementation review: the schedule jumps from 6 to 8 at level 8; it is used exactly as supplied and checked against the wiki text before M5b is finalised.)
+
+**Rule (integer arithmetic, no floats):** budget `B = 4 × (level − 1)` (+ Prestige bonus only if verified, see below); war points `W`, economic points `E` = sums of cumulative points; War if `W × 10 ≥ B × 7`; Economic if `E × 10 ≥ B × 7`; Hybrid if neither; if BOTH qualify (only possible with inconsistent data) => insufficient, roles untouched. Exactly one classification role after a valid sync; the other two are removed only when the data is complete and trustworthy. Validation before any change: profile ok; `skills` an array; every expected code present exactly once; levels non-negative integers <= `maxLevel`; `maxLevel` valid (0 only for stamina); `level` integer >= 1; `B` > 0; `W + E` <= `B`. Role kinds `build_war / build_eco / build_hybrid` already exist: no migration.
+
+**OPEN (blocks only the denominator, not the rest): Prestige.** The supplied wiki states that each Prestige grants 4 more skill points and the profile exposes `prestige`. Whether the available budget is `4 × (level − 1)` or `4 × (level − 1) + 4 × prestige` (and whether a prestige reset changes `level` or the invested skills) cannot be decided from the documented API: I will not guess. Plan for M5b: (1) the M5a probe already shows `prestige`; M5b adds a read-only check on real linked accounts that compares `W + E` with both budgets, because a player's invested points can never exceed the true budget (a player with prestige > 0 whose invested points exceed `4 × (level − 1)` proves the bonus applies); (2) until that evidence exists, any player with `prestige > 0` is classified **insufficient** (roles untouched) with the exact reason `prestige_budget_unverified`; (3) tests cover prestige 0, prestige > 0 with each budget rule, and the insufficient path.
+
+### 5.7 Updated acceptance criteria (replace A3.1–A3.9 where they differ)
+A3.1–A3.8 stand with the evidence above (the example budgets and the exact-70 % levels 6, 11, 16, 21, 26, 36 are unchanged). Added: **A3.10** unknown skill code => insufficient + diagnostic; **A3.11** `stamina` with `maxLevel = 0` never counts, `stamina` with a non-zero level or `maxLevel` > 0 => insufficient; **A3.12** both categories qualifying => insufficient, no role change; **A3.13** `prestige > 0` => insufficient (`prestige_budget_unverified`) until the evidence rule is implemented, then tests for both budget rules; **A3.14** every role not in the three classification kinds (party, unit, citizen, leadership, rank) is untouched by a classification change.
+
 ## 6. All affected areas (summary)
 | Area | M1.1 | M2a | M5a | M5b |
 |---|---|---|---|---|
@@ -125,10 +143,13 @@ Integer examples (assuming a verified cost schedule). Note: at level 29, B = 112
 * **Q3 (req. 1)** Ship the read-only probe (M5a) inside M1.1? *Default: yes, it is read-only.*
 * **Q4 (req. 2)** (a) Apply the removal also when an already-verified player activates the existing link in another server? *Default: yes.* (b) If the role sync after verification did not complete, keep the Unverified role and report it? *Default: yes.* (c) Add one neutral line to the user's reply if the removal failed? *Default: no, audit only.*
 * **Q5 (req. 2)** Also enforce "no Unverified role on verified members" at every later sync? *Default: no — only at verification time, as you described.*
-* **Q6 (req. 3)** Approve moving armor / dodge / health (and decide lootChance) out of "war" into "other"? Needs the game's skill catalogue from M5a.
-* **Q7 (req. 3)** Confirm that a player with few spent points is **Hybrid** (the literal result of your rule).
-* **Limitation L1** No documented skill data exists today (section 5.2). M5b cannot be finished until M5a shows the real structure; if the API does not expose it, only the game's operator can unblock it.
+* **Q6 (req. 3)** RESOLVED by the owner: the war / economic / non-investable grouping in 5.6.
+* **Q7 (req. 3)** RESOLVED: the rule is applied literally (unused points stay in the denominator, so few spent points => Hybrid).
+* **Limitation L1** RESOLVED: the probe confirmed the skill data (5.6). The remaining open point is the Prestige budget (5.6).
 * **Limitation L2** Nothing here has been or can be verified against real Discord / the live game from my sandbox.
 
 ## 8. Unchanged rules
 Delivery A, Delivery B and M1 behaviour is preserved. Delivery workflow unchanged: you approve a milestone, I implement, test and document it completely, deliver a changed-files-only ZIP (verified on a clean copy), you apply, deploy and confirm in production before the next milestone.
+
+## 9. Cross-cutting task: Discord synchronization result embeds (owner request after M1.1)
+Placement: **M2b**, because M2b introduces the shared Discord-embed layer (verification log), so one localized formatter serves both. It does not delay M2a. Scope: one reusable AR/EN formatter (`@aon/bot`) replacing the inline sentence of `/sync all`, single-member sync and other sync outcomes, with a consistent identity (title, colour per state: success / partial / warning / failure, sections for summary, execution details, role changes), every existing count and status preserved, failures / partial results / conflicts never hidden, diagnostic detail kept where it exists, RTL-safe Arabic, no change to sync logic, counting, permissions or workflows. First step of M2b: inventory every existing result-message builder (`describeSync`, guild-sync summary, `/sync` handlers) and identify what to share. Acceptance: tests for AR and EN, every result state (succeeded, partial, failed, nothing to do, conflict / blocked roles, rate limit), and that every metric the old message carried is present in the card.

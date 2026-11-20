@@ -31,7 +31,7 @@ export async function saveLadder(db: Db, guildId: string, ranks: readonly RankDe
   // A Discord role cannot be a rank role and a mapped office/membership role at the same time.
   const wanted = ranks.map((r) => r.discordRoleId).filter((x): x is string => x !== null);
   if (wanted.length) {
-    const clash = (await db.query<{ discord_role_id: string }>('SELECT DISTINCT discord_role_id FROM role_mappings WHERE guild_id=$1 AND discord_role_id = ANY($2::text[])', [guildId, wanted])).rows.map((x) => x.discord_role_id);
+    const clash = (await db.query<{ discord_role_id: string }>('SELECT discord_role_id FROM role_mappings WHERE guild_id=$1 AND discord_role_id = ANY($2::text[]) UNION SELECT unverified_role_id FROM guilds WHERE guild_id=$1 AND unverified_role_enabled AND unverified_role_id = ANY($2::text[])', [guildId, wanted])).rows.map((x) => x.discord_role_id);
     if (clash.length) { await audit(db, { guildId, actor, action: 'ranks.update_rejected', details: { reason: 'role_conflict', roleIds: clash } }); return { ok: false, issues: [], code: 'ROLE_CONFLICT', roleIds: clash }; }
   }
   await db.tx(async (t) => {

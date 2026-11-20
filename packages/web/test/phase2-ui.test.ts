@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
-import { addAdminRole, listRoleMappings, updateGuildSettings } from '@aon/db';
+import { addAdminRole, addRoleMapping, getGuildConfig, listRoleMappings, updateGuildSettings } from '@aon/db';
 import { ADMIN, BASE, SEND_ONLY, guildInfo, login, makeApp, role, type Ctx, type Login } from './harness.js';
 
 const PUB = join(__dirname, '..', 'public'); const G1 = '100000001', G2 = '100000002', MEMBER = '77';
@@ -285,5 +285,26 @@ describe('Diagnostics page: read-only API data probe', () => {
     const text = p.$('#probe-out')!.textContent!; expect(text).toContain('skills[0].code = attack'); expect(text).toContain('level = 29'); expect(text).not.toContain('SecretName');
     expect(p.$('#probe-copy')).not.toBeNull();
     const ar = await open(c, l, `#/g/${G1}/diag`, 'ar'); await waitFor(() => ar.$('#probe-card h3'), 'ar'); expect(ar.$('#probe-card h3')!.textContent).toContain('فحص بيانات اللعبة');
+  });
+});
+
+describe('Verification page: optional Unverified-role removal card', () => {
+  it('is off by default; enabling needs a role (nothing is sent without one); saving persists; changing the role and turning it off persist', async () => {
+    const { c, l } = await boot(); const p = await open(c, l, `#/g/${G1}/verify`); await waitFor(() => p.$('#uv-card'), 'card');
+    const on = p.$('#uv-enabled') as unknown as HTMLInputElement; expect(on.checked).toBe(false);
+    const puts = () => p.calls.filter((x) => x.method === 'PUT' && x.url.includes('unverified-role')).length;
+    on.checked = true; on.dispatchEvent(new p.win.Event('change')); expect(p.$('#uv-warn')!.textContent).toContain('Choose the role first'); click(p, p.$('#uv-save')); expect(puts()).toBe(0);
+    down(p, roleOpt(p.$('#uv-card')!, '900005')); expect(p.$('#uv-warn')!.textContent).toBe(''); click(p, p.$('#uv-save'));
+    for (let i = 0; i < 80 && !(await getGuildConfig(c.db, G1))?.unverifiedRoleEnabled; i++) await new Promise((r) => setTimeout(r, 50));
+    expect(await getGuildConfig(c.db, G1)).toMatchObject({ unverifiedRoleEnabled: true, unverifiedRoleId: '900005' });
+    const again = await open(c, l, `#/g/${G1}/verify`); await waitFor(() => again.$('#uv-card'), 'reload'); expect((again.$('#uv-enabled') as unknown as HTMLInputElement).checked).toBe(true);
+    expect(again.$('#uv-card .picker-selected')!.textContent).toContain('Plain');
+  });
+  it('a role the bot already uses is refused with a clear message; Arabic renders', async () => {
+    const { c, l } = await boot(); await addRoleMapping(c.db, { guildId: G1, kind: 'citizen', discordRoleId: '900001', actor: null });
+    const p = await open(c, l, `#/g/${G1}/verify`); await waitFor(() => p.$('#uv-card'), 'card'); const on = p.$('#uv-enabled') as unknown as HTMLInputElement; on.checked = true;
+    down(p, roleOpt(p.$('#uv-card')!, '900001')); click(p, p.$('#uv-save')); await waitFor(() => toast(p).includes('uses this role for something else') ? true : null, 'conflict toast');
+    expect((await getGuildConfig(c.db, G1))!.unverifiedRoleEnabled).toBe(false);
+    const ar = await open(c, l, `#/g/${G1}/verify`, 'ar'); await waitFor(() => ar.$('#uv-card h3'), 'ar'); expect(ar.$('#uv-card h3')!.textContent).toContain('غير موثق');
   });
 });

@@ -21,6 +21,8 @@ export interface GuildConfig {
   autoSyncEnabled: boolean; syncIntervalMinutes: number; nextSyncAt: Date | null;
   /** Channel where the verification-ticket panel is posted (null = not configured; `/verify` still works anywhere). */
   verificationChannelId: string | null;
+  /** Optional: remove this server's "Unverified" role from a member after a successful verification (off by default). */
+  unverifiedRoleEnabled: boolean; unverifiedRoleId: string | null;
 }
 export interface RoleMapping { id: string; guildId: string; kind: RoleKind; gameRef: string; discordRoleId: string }
 
@@ -30,6 +32,7 @@ interface GuildRow {
   modules: GuildConfig['modules']; require_staff_approval: boolean; demotion_mode: 'never' | 'immediate' | 'grace';
   demotion_grace_days: number; sync_interval_minutes: number; auto_sync_enabled: boolean; next_sync_at: Date | null;
   unit_leader_replaces_member: boolean; verification_channel_id: string | null;
+  unverified_role_enabled: boolean; unverified_role_id: string | null;
 }
 
 export async function ensureGuild(db: Db, guildId: string, name: string): Promise<void> {
@@ -43,7 +46,7 @@ export async function getGuildConfig(db: Db, guildId: string): Promise<GuildConf
   return {
     guildId: g.guild_id, name: g.name, communityType: g.community_type, language: g.language,
     countryId: g.country_id, partyId: g.party_id, unitId: g.unit_id, allianceId: g.alliance_id,
-    modules: g.modules, requireStaffApproval: g.require_staff_approval, linkMode: g.require_staff_approval ? 'staff_approval' : 'direct', unitLeaderReplacesMember: g.unit_leader_replaces_member, autoSyncEnabled: g.auto_sync_enabled, syncIntervalMinutes: g.sync_interval_minutes, nextSyncAt: g.next_sync_at, verificationChannelId: g.verification_channel_id,
+    modules: g.modules, requireStaffApproval: g.require_staff_approval, linkMode: g.require_staff_approval ? 'staff_approval' : 'direct', unitLeaderReplacesMember: g.unit_leader_replaces_member, autoSyncEnabled: g.auto_sync_enabled, syncIntervalMinutes: g.sync_interval_minutes, nextSyncAt: g.next_sync_at, verificationChannelId: g.verification_channel_id, unverifiedRoleEnabled: g.unverified_role_enabled, unverifiedRoleId: g.unverified_role_id,
     demotion: g.demotion_mode === 'grace' ? { mode: 'grace', graceDays: g.demotion_grace_days } : { mode: g.demotion_mode },
   };
 }
@@ -67,7 +70,30 @@ const ROLE_ID = /^\d{5,25}$/;
 async function lockGuild(t: Db, guildId: string): Promise<{ community_type: string; country_id: string | null } | null> {
   return (await t.query<{ community_type: string; country_id: string | null }>('SELECT community_type, country_id FROM guilds WHERE guild_id=$1 FOR UPDATE', [guildId])).rows[0] ?? null;
 }
-const roleIsRank = async (t: Db, guildId: string, roleId: string) => (await t.query('SELECT 1 FROM military_ranks WHERE guild_id=$1 AND discord_role_id=$2', [guildId, roleId])).rows.length > 0;
+/** A role the bot must not manage as a mapping: a military-rank role, or the configured (enabled) "Unverified" role that verification REMOVES. */
+const roleIsRank = async (t: Db, guildId: string, roleId: string) => (await t.query(
+  `SELECT 1 FROM military_ranks WHERE guild_id=$1 AND discord_role_id=$2 UNION ALL SELECT 1 FROM guilds WHERE guild_id=$1 AND unverified_role_enabled AND unverified_role_id=$2`, [guildId, roleId])).rows.length > 0;
+/** True when the bot grants / manages this role for some other purpose (any role mapping, a rank role, a build role). Used to refuse it as the Unverified role and as a last guard before removing it. */
+export async function roleIsManagedByBot(db: Db, guildId: string, roleId: string): Promise<boolean> {
+  return (await db.query(`SELECT 1 FROM role_mappings WHERE guild_id=$1 AND discord_role_id=$2 UNION ALL SELECT 1 FROM military_ranks WHERE guild_id=$1 AND discord_role_id=$2`, [guildId, roleId])).rows.length > 0;
+}
+export type SetUnverifiedResult = { ok: true } | { ok: false; code: 'GUILD_NOT_FOUND' | 'ROLE_INVALID' | 'ROLE_REQUIRED' | 'ROLE_CONFLICT' };
+/**
+ * The optional Unverified-role removal setting. `enabled` needs a role. The role may not be any role the bot manages (citizen, proxy, party / unit,
+ * president / leader / owner, build, rank): removing such a role after verification would take away what the bot just granted. Under the guild lock, so it cannot
+ * race the mapping writers, which refuse this role once it is enabled.
+ */
+export async function setUnverifiedRole(db: Db, a: { guildId: string; enabled: boolean; roleId: string | null; actor: string | null }): Promise<SetUnverifiedResult> {
+  if (a.roleId !== null && !ROLE_ID.test(a.roleId)) return { ok: false, code: 'ROLE_INVALID' };
+  if (a.enabled && a.roleId === null) return { ok: false, code: 'ROLE_REQUIRED' };
+  return db.tx<SetUnverifiedResult>(async (t) => {
+    const g = await lockGuild(t, a.guildId); if (!g) return { ok: false, code: 'GUILD_NOT_FOUND' };
+    if (a.roleId !== null && (await t.query(`SELECT 1 FROM role_mappings WHERE guild_id=$1 AND discord_role_id=$2 UNION ALL SELECT 1 FROM military_ranks WHERE guild_id=$1 AND discord_role_id=$2`, [a.guildId, a.roleId])).rows.length) return { ok: false, code: 'ROLE_CONFLICT' };
+    await t.query('UPDATE guilds SET unverified_role_enabled=$2, unverified_role_id=$3 WHERE guild_id=$1', [a.guildId, a.enabled, a.roleId]);
+    await audit(t, { guildId: a.guildId, actor: a.actor, action: 'verification.unverified_role.set', target: a.roleId ?? 'none', details: { enabled: a.enabled } });
+    return { ok: true };
+  });
+}
 
 /**
  * One membership role per party / unit per server, across BOTH kinds of the family (generic `party_member` / `unit_member` with a game reference and
@@ -464,7 +490,8 @@ export async function setBuildRoles(db: Db, a: { guildId: string; roles: Partial
   if (fresh.length) {
     const clash = (await db.query<{ r: string }>(
       `SELECT discord_role_id AS r FROM military_ranks WHERE guild_id=$1 AND discord_role_id = ANY($2::text[])
-       UNION SELECT discord_role_id FROM role_mappings WHERE guild_id=$1 AND discord_role_id = ANY($2::text[]) AND kind NOT IN ('build_war','build_eco','build_hybrid')`, [a.guildId, fresh])).rows.map((r) => r.r);
+       UNION SELECT discord_role_id FROM role_mappings WHERE guild_id=$1 AND discord_role_id = ANY($2::text[]) AND kind NOT IN ('build_war','build_eco','build_hybrid')
+       UNION SELECT unverified_role_id FROM guilds WHERE guild_id=$1 AND unverified_role_enabled AND unverified_role_id = ANY($2::text[])`, [a.guildId, fresh])).rows.map((r) => r.r);
     if (clash.length) return { ok: false, code: 'ROLE_CONFLICT', roleIds: clash };
   }
   await db.tx(async (t) => {

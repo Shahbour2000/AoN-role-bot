@@ -5,7 +5,7 @@
  */
 import { audit, beginCheck, cancelAttempt, completeVerification, createAttempt, endCheck, ensureGuildLink, getAttempt, getGlobalLinkForUser, getGuildConfig, getPendingAttemptForUser } from '@aon/db';
 import { findCodeInCompanies, VERIFICATION } from '@aon/core';
-import { syncOneUser } from '@aon/sync';
+import { removeUnverifiedRole, syncOneUser } from '@aon/sync';
 import type { BotDeps, Reply } from './handlers.js';
 import { t, type Lang } from './messages.js';
 import { describeSync, esc, gameFailure, removeGrantedRoles, syncDeps } from './shared.js';
@@ -17,12 +17,22 @@ const ticketButtons = (lang: Lang, id: string): NonNullable<Reply['buttons']> =>
   { id: `vc:${id}`, label: t(lang, 'vt_check_btn'), primary: true }, { id: `vn:${id}`, label: t(lang, 'vt_new_btn') }, { id: `vx:${id}`, label: t(lang, 'vt_close_btn') },
 ];
 
-async function syncNote(c: VerifyCtx, lang: Lang): Promise<string> {
+/**
+ * Role synchronisation right after a verification (grants the citizen role and everything else this server maps). `ok` is true only when it finished and
+ * wrote every planned role: the optional Unverified-role removal runs only then, so nobody is left with neither role.
+ */
+async function syncNote(c: VerifyCtx, lang: Lang): Promise<{ text: string; ok: boolean }> {
   try {
     const s = await syncOneUser(syncDeps(c.deps), c.guildId, c.userId);
-    if (!('error' in s) && (s.outcome === 'updated' || s.outcome === 'unchanged' || s.outcome === 'partial')) return `${t(lang, 'link_synced_note')} ${describeSync(lang, s)}`;
+    if (!('error' in s) && (s.outcome === 'updated' || s.outcome === 'unchanged' || s.outcome === 'partial')) return { text: `${t(lang, 'link_synced_note')} ${describeSync(lang, s)}`, ok: s.blocked.length === 0 };
   } catch { /* the link is already saved; roles follow at the next sync */ }
-  return t(lang, 'link_sync_later');
+  return { text: t(lang, 'link_sync_later'), ok: false };
+}
+
+/** Optional, per-server: remove the configured "Unverified" role. Never throws and never changes the verification reply; every outcome is audited by the service. */
+async function afterVerified(c: VerifyCtx, syncOk: boolean): Promise<void> {
+  try { await removeUnverifiedRole({ db: c.deps.db, discord: c.deps.discord }, { guildId: c.guildId, userId: c.userId, syncOk, actor: c.userId }); }
+  catch (e) { c.deps.log?.(`unverified role removal failed unexpectedly: ${(e as Error).message}`); }
 }
 
 /** Opens a ticket (`/verify`, the panel button, or `/link`). A member who is already verified just gets this server's roles. */
@@ -31,7 +41,8 @@ export async function openTicket(c: VerifyCtx, username: string | undefined): Pr
   const global = await getGlobalLinkForUser(c.deps.db, c.userId);
   if (global) {
     await ensureGuildLink(c.deps.db, { guildId: c.guildId, discordUserId: c.userId });            // explicit use of the bot in this server: no second verification
-    return { content: t(lang, 'vt_already_linked', { name: esc(global.username ?? global.playerId), id: global.playerId, sync: await syncNote(c, lang) }) };
+    const sn = await syncNote(c, lang); await afterVerified(c, sn.ok);                                   // an existing global link activated in THIS server uses this server's setting
+    return { content: t(lang, 'vt_already_linked', { name: esc(global.username ?? global.playerId), id: global.playerId, sync: sn.text }) };
   }
   const open = await getPendingAttemptForUser(c.deps.db, c.userId, now);
   if (open && !username) return { content: t(lang, 'vt_existing', { name: esc(open.playerUsername ?? open.playerId) }), buttons: ticketButtons(lang, open.id) };
@@ -84,7 +95,8 @@ export async function checkTicket(c: VerifyCtx, attemptId: string): Promise<Repl
     return { content: t(lang, done.code === 'EXPIRED' ? 'vt_expired' : 'vt_gone') };
   }
   if (done.displaced) for (const g of done.displaced.guilds) await removeGrantedRoles(c.deps, g.guildId, done.displaced.discordUserId, g.managedRoleIds);   // the unproven claimant loses what that claim granted
-  return { content: t(lang, 'vt_ok', { name: esc(at.playerUsername ?? at.playerId), sync: await syncNote(c, lang) }) };
+  const sn = await syncNote(c, lang); await afterVerified(c, sn.ok);
+  return { content: t(lang, 'vt_ok', { name: esc(at.playerUsername ?? at.playerId), sync: sn.text }) };
 }
 
 /** "New code": same game account, fresh code (the old one stops working). */

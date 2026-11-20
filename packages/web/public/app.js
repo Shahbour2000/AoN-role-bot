@@ -512,7 +512,7 @@
 
   // ---------------------------------------------------------------- verification tickets
   async function verifyPage(g) {
-    const [st, ch, pn] = await Promise.all([api('GET', `/api/guilds/${g}/verification`), api('GET', `/api/guilds/${g}/channels`), api('GET', `/api/guilds/${g}/verification/panel`)]);
+    const [st, ch, pn, rl] = await Promise.all([api('GET', `/api/guilds/${g}/verification`), api('GET', `/api/guilds/${g}/channels`), api('GET', `/api/guilds/${g}/verification/panel`), api('GET', `/api/guilds/${g}/roles`)]);
     if (!st.ok) return [failPanel(errText(st), route)];
     const d = st.data; const n = (k) => fmtNum(d.last30d[k] ?? 0);
     const kpi = (ic, label, value) => el('div', { class: 'card stat' }, el('h3', {}, icon(ic), ' ', label), el('p', { text: value }));
@@ -531,6 +531,7 @@
       el('div', { class: 'stats' }, kpi('check', t('vf_verified'), n('verified')), kpi('clock', t('vf_pending'), n('pending')), kpi('close', t('vf_failed'), fmtNum((d.last30d.expired ?? 0) + (d.last30d.cancelled ?? 0) + (d.last30d.locked ?? 0))), kpi('link', t('vf_linked'), fmtNum(d.linkedMembers.total))),
       el('div', { class: 'card' }, el('h3', { text: t('vf_channel') }), el('p', { class: 'muted', text: t('vf_channel_hint') }),
         ch.ok ? field(t('vf_channel'), sel) : el('p', { class: 'err', text: t('vf_channels_unavailable') }), el('div', { class: 'row' }, ch.ok ? save : [])),
+      unverifiedCard(g, d.unverifiedRole, rl),
       panelEditorSafe(g, pn, ch.ok ? ch.data.channels : [], sel, d.channelId),
       legacy ? el('div', { class: 'callout warn', role: 'note' }, el('p', { text: t('vf_legacy_note', { n: fmtNum(legacy) }) })) : null,
       el('h3', { text: t('vf_recent') }),
@@ -538,6 +539,26 @@
     ];
   }
 
+
+  /** Optional Unverified-role removal after a successful verification: toggle + searchable role picker. Off by default. */
+  function unverifiedCard(g, cur, rl) {
+    const cfg = cur || { enabled: false, roleId: null }; const roles = rl && rl.ok ? (rl.data.roles || []) : null;
+    if (!roles) return el('div', { class: 'card', id: 'uv-card' }, el('h3', { text: t('uv_title') }), el('p', { class: 'err', text: t('e_discord_unavailable') }));
+    const on = el('input', { type: 'checkbox', id: 'uv-enabled', ...(cfg.enabled ? { checked: true } : {}) });
+    const pick = roleSelect(roles, cfg.roleId || '', true, new Set(), t('uv_role'));
+    const warn = el('p', { class: 'muted', id: 'uv-warn' });
+    const missing = cfg.roleId && !roles.some((r) => r.id === cfg.roleId);
+    const sync = () => { warn.textContent = on.checked && !pick.value ? t('uv_need_role') : missing && pick.value === cfg.roleId ? t('uv_role_missing') : ''; };
+    on.addEventListener('change', sync); pick.addEventListener('change', sync); sync();
+    const save = el('button', { class: 'btn primary', type: 'button', id: 'uv-save', text: t('save') });
+    save.addEventListener('click', async () => {
+      if (on.checked && !pick.value) { toast(t('uv_need_role'), true); return; }
+      save.disabled = true; const r = await api('PUT', `/api/guilds/${g}/verification/unverified-role`, { enabled: on.checked, roleId: pick.value || null }); save.disabled = false;
+      if (r.ok) toast(t('uv_saved')); else toast(r.data && r.data.error === 'role_conflict' ? t('uv_conflict') : errText(r), true);
+    });
+    return el('div', { class: 'card', id: 'uv-card' }, el('h3', { text: t('uv_title') }), el('p', { class: 'muted', text: t('uv_hint') }),
+      el('label', { class: 'check' }, on, ' ', t('uv_enable')), field(t('uv_role'), pick), warn, el('div', { class: 'row' }, save));
+  }
 
   // The editor is an add-on to the statistics/channel page: a failed or malformed panel response must never take the rest of the page down.
   function panelEditorSafe(g, pn, channels, channelSel, savedChannelId) {

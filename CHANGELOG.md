@@ -1,5 +1,16 @@
 # Changelog
 
+## M2a — optional "Unverified" role removal after a successful verification
+**Added**
+- Migration `0013` (additive): `guilds.unverified_role_enabled boolean NOT NULL DEFAULT false`, `guilds.unverified_role_id text`, CHECKs (enabled needs a role; id format). Existing servers: disabled, behaviour unchanged.
+- `@aon/db`: `setUnverifiedRole` (under the guild lock), `roleIsManagedByBot`; `GuildConfig.unverifiedRoleEnabled / unverifiedRoleId`. Once enabled, the role is reserved: `addRoleMapping`, `setProxyCountry`, `setIdentityRole`, `setEntityMemberRole`, `setBuildRoles` and `saveLadder` refuse it (`ROLE_CONFLICT`); enabling a role that is already managed is refused.
+- `@aon/sync`: `removeUnverifiedRole` (reuses `classifyDiscordError`): removes only the configured role, only when the role synchronisation completed, only if the member holds it and the bot can remove it; never a role the bot manages; one retry for rate limits / transient errors; never throws; audited (`verification.unverified_removed`, `_removal_skipped`, `_removal_failed`; settings change: `verification.unverified_role.set`).
+- Bot: `verification.ts` runs it after the role synchronisation at both success points (new verification, existing global link activated in this server). The reply text is unchanged.
+- Dashboard *Verification*: toggle + searchable role picker, warnings, AR / EN; API `PUT /api/guilds/:g/verification/unverified-role` (422 `role_invalid` / `role_required` / `role_not_removable`, 409 `role_conflict`, 503 when Discord is unavailable); `GET .../verification` includes the setting.
+- Docs: `docs/VERIFICATION.md` section; `docs/ROADMAP.md` 5.6 / 5.7 (M5a evidence: skill data confirmed, groups, cost schedule, rule, Prestige open point) and section 9 (sync-result embeds placed in M2b).
+**Tests:** db (setting, both directions of role exclusivity, migration upgrade, PG16 race), sync `unverified.test.ts` (10), bot `unverified-flow.test.ts` (7, real ticket flow), web API (4) and jsdom (2).
+**Unchanged:** Delivery A, Delivery B, M1, M1.1 behaviour; no existing test needed changing.
+
 ## M1.1 — strict one-party / one-unit membership; read-only API data probe (M5a)
 **Changed**
 - Sync (`member-sync.ts`): `enforceOneMembershipRole` — if more than one DIFFERENT Discord role of a membership family (party: `party_member` + `country_party_member`; unit: `unit_member` + `country_unit_member`; mappings with a game reference) would qualify at once, none is granted, nothing is removed, `membership_conflict:<family>` is reported. Roles of entities the player is not in stay "not qualifies" and are removed as before.
